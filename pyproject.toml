@@ -1,0 +1,14 @@
+[project]
+name = "modular-diffusion"
+version = "0.1.0"
+description = "a tinkerer's attempt at an inference engine for diffusion, focusing on core end-to-end inference pipelines for video models, leveraging well-supported external libraries as much as possible for modularity"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "diffusers>=0.32.2",
+    "packaging>=24.2",
+    "pip>=25.0.1",
+    "pyproject-toml>=0.1.0",
+    "setuptools>=76.1.0",
+    "transformers>=4.49.0",
+]
