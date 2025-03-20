@@ -54,6 +54,8 @@ class WanVideoPipeline:
         device: str = "cuda",
         dtype: torch.dtype = torch.bfloat16,
         memory_config: Optional["MemoryConfig"] = None,
+        enable_teacache: bool = False,
+        teacache_config: Optional[Dict] = None,
     ):
         """Initialize the WanVideo pipeline."""
         self.logger = structlog.get_logger().bind(component="WanVideoPipeline")
@@ -70,41 +72,202 @@ class WanVideoPipeline:
         self.logger.info(
             "Initializing WanVideo pipeline", model_path=model_path, device=str(device)
         )
-        
+
+        # Initialize TeaCache if enabled
+        self.enable_teacache = enable_teacache
+        if enable_teacache:
+            from ..utils.teacache import TeaCache
+
+            teacache_config = teacache_config or {}
+            self.teacache = TeaCache(
+                rel_l1_thresh=teacache_config.get("rel_l1_thresh", 0.15),
+                start_step=teacache_config.get(
+                    "start_step", 5
+                ),  # Skip early critical steps
+                end_step=teacache_config.get("end_step", -1),
+                cache_device=torch.device("cpu")
+                if teacache_config.get("cache_device") == "cpu"
+                else self.device,
+                use_polynomial_coefficients=teacache_config.get(
+                    "use_polynomial_coefficients", True
+                ),
+            )
+            # Determine model variant for coefficients
+            if "14B" in model_path:
+                self.model_variant = "14B"
+            elif "1.3B" in model_path:
+                self.model_variant = "1_3B"
+            elif "i2v" in model_path.lower() and "480" in model_path:
+                self.model_variant = "i2v_480"
+            elif "i2v" in model_path.lower():
+                self.model_variant = "i2v_720"
+            else:
+                self.model_variant = "14B"  # Default
+
         # Determine the model type (t2v or i2v)
         self.model_type = self._determine_model_type(model_path)
-        
+
         # Load the text encoder
         with self.memory_tracker.track_usage("Loading text encoder"):
             self.text_encoder = T5TextEncoder(
-                model_path=model_path,
+                model_path=os.path.join(model_path, "text_encoder"),
                 device=device,
                 dtype=dtype,
                 use_cpu=self.memory_config.text_encoder_offload,
             )
-        
-        # TODO: Load the diffusion model
-        # self.diffusion_model = WanVideoDiT(...)
-        
-        # TODO: Load the VAE
-        # self.vae = WanVideoVAE(...)
-        
+
+        # Load the diffusion model
+        with self.memory_tracker.track_usage("Loading diffusion model"):
+            from ..models.diffusion_model import WanDiT
+
+            # Determine model parameters based on type
+            if self.model_type == "t2v":
+                in_dim = 16  # Standard latent dimension
+                model_config = {
+                    "model_type": "t2v",
+                    "in_dim": in_dim,
+                    "dim": 2048 if "14B" in model_path else 1536,
+                    "ffn_dim": 8192 if "14B" in model_path else 4096,
+                    "freq_dim": 256,  # For time embeddings
+                    "text_dim": 4096,  # T5 output dimension
+                    "out_dim": 16,  # Output latent dimension
+                    "num_heads": 16 if "14B" in model_path else 12,
+                    "num_layers": 32 if "14B" in model_path else 24,
+                    "patch_size": (1, 2, 2),
+                    "main_device": self.device,
+                    "offload_device": "cpu",
+                }
+            else:  # i2v
+                in_dim = 16
+                model_config = {
+                    "model_type": "i2v",
+                    "in_dim": in_dim,
+                    "dim": 2048,
+                    "ffn_dim": 8192,
+                    "freq_dim": 256,
+                    "text_dim": 4096,
+                    "out_dim": 16,
+                    "num_heads": 16,
+                    "num_layers": 32,
+                    "patch_size": (1, 2, 2),
+                    "main_device": self.device,
+                    "offload_device": "cpu",
+                }
+
+            # Find the diffusion model weights
+            diffusion_path = os.path.join(model_path, "diffusion_model.safetensors")
+            if not os.path.exists(diffusion_path):
+                diffusion_path = os.path.join(model_path, "transformer.safetensors")
+
+            if not os.path.exists(diffusion_path):
+                raise FileNotFoundError(
+                    f"Could not find diffusion model weights at {diffusion_path}"
+                )
+
+            # Load weights
+            try:
+                from safetensors.torch import load_file
+
+                state_dict = load_file(diffusion_path)
+            except ImportError:
+                self.logger.warning(
+                    "safetensors not available, falling back to torch.load"
+                )
+                state_dict = torch.load(diffusion_path, map_location="cpu")
+
+            # Create model
+            self.diffusion_model = WanDiT(**model_config)
+
+            # Load weights
+            missing_keys, unexpected_keys = self.diffusion_model.load_state_dict(
+                state_dict, strict=False
+            )
+            if missing_keys:
+                self.logger.warning(
+                    f"Missing keys when loading diffusion model: {len(missing_keys)} keys"
+                )
+            if unexpected_keys:
+                self.logger.warning(
+                    f"Unexpected keys when loading diffusion model: {len(unexpected_keys)} keys"
+                )
+
+            # Apply memory optimizations
+            if self.memory_config:
+                self.diffusion_model = self.memory_config.apply_to_model(
+                    self.diffusion_model
+                )
+
+            # Configure block swapping for memory efficiency
+            if (
+                hasattr(self.memory_config, "block_swap_count")
+                and self.memory_config.block_swap_count > 0
+            ):
+                self.diffusion_model.configure_block_swap(
+                    self.memory_config.block_swap_count
+                )
+
+        # Load the VAE
+        with self.memory_tracker.track_usage("Loading VAE"):
+            from ..models.vae import WanVideoVAE
+
+            # Find VAE weights
+            vae_path = os.path.join(model_path, "vae.safetensors")
+            if not os.path.exists(vae_path):
+                vae_path = os.path.join(model_path, "vae/model.safetensors")
+
+            if not os.path.exists(vae_path):
+                raise FileNotFoundError(f"Could not find VAE weights at {vae_path}")
+
+            # Load weights
+            try:
+                from safetensors.torch import load_file
+
+                vae_state_dict = load_file(vae_path)
+            except ImportError:
+                self.logger.warning(
+                    "safetensors not available, falling back to torch.load"
+                )
+                vae_state_dict = torch.load(vae_path, map_location="cpu")
+
+            # Create model
+            self.vae = WanVideoVAE(
+                dim=96,  # Default for WanVideo VAE
+                z_dim=16,  # Latent dimension
+                dtype=self.dtype,
+            )
+
+            # Load weights
+            self.vae.load_state_dict(vae_state_dict)
+
+            # VAE initially on CPU to save memory if configured
+            if (
+                hasattr(self.memory_config, "vae_offload")
+                and self.memory_config.vae_offload
+            ):
+                self.vae.to("cpu")
+            else:
+                self.vae.to(self.device)
+
         # Create the scheduler
+        from ..schedulers.flow_scheduler import FlowUniPCScheduler
+
         self.scheduler = FlowUniPCScheduler(
+            num_train_timesteps=1000,
             prediction_type="flow_prediction",
-            shift=5.0  # Default shift parameter
+            shift=5.0,  # Default shift parameter
         )
-        
-        self.logger.info("WanVideo pipeline initialized",
-                        model_type=self.model_type)
-    
+
+        self.logger.info(
+            "WanVideo pipeline initialized successfully", model_type=self.model_type
+        )
+
     def _determine_model_type(self, model_path: str) -> str:
         """
         Determine whether the model is text-to-video or image-to-video.
-        
+
         Args:
             model_path: Path to the model directory
-            
+
         Returns:
             Model type ("t2v" or "i2v")
         """
@@ -115,22 +278,23 @@ class WanVideoPipeline:
         elif "i2v" in model_path.lower() or "image-to-video" in model_path.lower():
             self.logger.info("Detected image-to-video model")
             return "i2v"
-        
+
         # Try to read from config file
         config_path = os.path.join(model_path, "transformer/config.json")
         if os.path.exists(config_path):
             import json
+
             with open(config_path, "r") as f:
                 config = json.load(f)
                 if "model_type" in config:
                     model_type = config["model_type"]
                     self.logger.info(f"Found model type in config: {model_type}")
                     return model_type
-        
+
         # Default to t2v if we can't determine
         self.logger.warning("Could not determine model type, defaulting to t2v")
         return "t2v"
-    
+
     def __call__(
         self,
         prompt: Union[str, List[str]],
@@ -222,7 +386,9 @@ class WanVideoPipeline:
 
         # 4. Set up the noise scheduler
         self.logger.debug(f"Setting up scheduler with {num_inference_steps} steps")
-        self.scheduler.set_timesteps(num_inference_steps, device=self.device, shift=shift)
+        self.scheduler.set_timesteps(
+            num_inference_steps, device=self.device, shift=shift
+        )
         timesteps = self.scheduler.timesteps
 
         # 5. Adjust context parameters for latent space if using context windows
@@ -245,6 +411,7 @@ class WanVideoPipeline:
                 uniform_looped,
                 uniform_standard,
             )
+
             context_scheduler = get_context_scheduler("uniform_standard")
 
         # 6. Run the denoising loop
@@ -260,11 +427,23 @@ class WanVideoPipeline:
         # Store for callback visualization
         latent_history = []
 
+        # Initialize TeaCache prediction streams if enabled
+        if self.enable_teacache:
+            cond_pred_id = self.teacache.new_prediction()
+            if guidance_scale > 1.0:
+                uncond_pred_id = self.teacache.new_prediction()
+            else:
+                uncond_pred_id = None
+
         with self.memory_tracker.track_usage("Denoising"):
             # Loop through each timestep
             for i, t in enumerate(timesteps):
                 # Current position in sampling process (0-1)
                 current_step_percentage = i / len(timesteps)
+
+                ####
+                #### Add teacache logic for cond and uncond
+                ####
 
                 # Get context windows for this step if using windowing
                 if use_context_windows:
@@ -464,8 +643,8 @@ class WanVideoPipeline:
         """
         Create a blending mask for context windows.
 
-        This creates smooth transitions between windows to avoid seams when
-        processing video in chunks, similar to sliding window attention in LLMs.
+        Similar to how LLMs use sliding window attention for long contexts,
+        this creates smooth transitions between video chunks.
 
         Args:
             tensor: Tensor to create mask for (gets shape from this)
@@ -518,28 +697,32 @@ class WanVideoPipeline:
         Returns:
             Decoded video tensor of shape [T, H, W, 3]
         """
-        # Move VAE to device for decoding
-        self.vae.to(self.device)
+        # Move VAE to device for decoding if needed
+        if next(self.vae.parameters()).device != self.device:
+            self.vae.to(self.device)
 
         # Clone and move latents to avoid modifying input
         latents = latents.clone().to(device=self.device, dtype=self.vae.dtype)
-
-        # Scale latents if needed (depends on VAE implementation)
-        # For WanVideo VAE, no scaling needed as it's handled internally
 
         # Decode latents to pixel space
         with torch.no_grad():
             if enable_tiling:
                 # Use tiled decoding to save memory
                 video = self.vae.tiled_decode(
-                    latents, self.device, tile_size=tile_size, tile_stride=tile_stride
+                    latents, self.device, tile_size, tile_stride
                 )[0]
             else:
-                # Decode directly
-                video = self.vae.decode(latents, self.device)[0]
+                # For regular decode, we need to handle the device ourselves
+                # since the VAE method doesn't take a device parameter
+                video = self.vae.decode(latents)[0]
 
-        # Move VAE back to CPU to save memory
-        self.vae.to("cpu")
+        # Move VAE back to CPU if memory optimization is enabled
+        if (
+            hasattr(self.memory_config, "vae_offload")
+            and self.memory_config.vae_offload
+        ):
+            self.vae.to("cpu")
+            self.memory_tracker.clear_cache()
 
         # Convert to [T, H, W, 3] format with range [0, 1]
         # VAE output is [-1, 1] range
