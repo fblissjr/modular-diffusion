@@ -26,7 +26,10 @@ from ..models.t5_encoder import T5TextEncoder
 # Note: We'll implement these next, but referencing them here for structure
 # from ..models.diffusion_model import WanVideoDiT
 # from ..models.vae import WanVideoVAE
-from ..schedulers.flow_schedulers import FlowUniPCScheduler
+from .schedulers.flow_schedulers import FlowUniPCScheduler
+import imageio
+from ..utils.memory import MemoryConfig, MemoryTracker, DeviceManager
+import math
 
 logger = structlog.get_logger()
 
@@ -170,62 +173,62 @@ class WanVideoPipeline:
     ) -> WanVideoPipelineOutput:
         """
         Generate a video from a text prompt.
-        
+
         This method implements the full diffusion pipeline:
         1. Encode text prompts to embeddings
         2. Initialize random noise
         3. Gradually denoise with the diffusion model
         4. Decode the final latents with the VAE
-        
-        Args:
-            prompt: Text prompt(s) to generate from
-            negative_prompt: Text that should not be in the result
-            height: Height of the generated video
-            width: Width of the generated video 
-            num_frames: Number of frames to generate
-            num_inference_steps: Number of denoising steps
-            guidance_scale: Classifier-free guidance scale
-            shift: Flow matching shift parameter
-            seed: Random seed for reproducibility
-            use_context_windows: Whether to use context windowing
-            context_size: Size of each context window
-            context_stride: Stride between context windows
-            context_overlap: Overlap between windows
-            enable_vae_tiling: Whether to use VAE tiling
-            vae_tile_size: Size of VAE tiles
-            vae_tile_stride: Stride between VAE tiles
-            output_type: Type of output file ("mp4" or "gif")
-            save_path: Path to save the output
-            save_latents: Whether to include latents in the output
-            callback: Callback function for progress updates
-            
-        Returns:
-            WanVideoPipelineOutput containing the generated video
         """
         # Set random seed for reproducibility
         if seed is None:
             seed = random.randint(0, 2**32 - 1)
         self.logger.info("Using seed", seed=seed)
-        
+
         # Make sure prompt is a list
         if isinstance(prompt, str):
             prompt = [prompt]
-        
-        self.logger.info("Starting video generation", 
-                        prompts=[p[:50] + "..." if len(p) > 50 else p for p in prompt],
-                        num_frames=num_frames,
-                        steps=num_inference_steps)
-        
+
+        self.logger.info(
+            "Starting video generation",
+            prompts=[p[:50] + "..." if len(p) > 50 else p for p in prompt],
+            num_frames=num_frames,
+            steps=num_inference_steps,
+        )
+
         # 1. Encode the text prompts to embeddings
-        text_embeds = self.text_encoder.encode(prompt, negative_prompt=negative_prompt)
-        
+        self.logger.debug("Encoding text prompts")
+        with self.memory_tracker.track_usage("Text encoding"):
+            text_embeds = self.text_encoder.encode(
+                prompt, negative_prompt=negative_prompt
+            )
+
         # 2. Set up the latent space dimensions
-        latent_height = height // 8  # VAE downsamples by factor of 8
+        # VAE downsamples spatially by factor of 8 and temporally by factor of 4
+        latent_height = height // 8
         latent_width = width // 8
-        latent_frames = (num_frames - 1) // 4 + 1  # VAE temporal downsampling
-        
+        latent_frames = (num_frames - 1) // 4 + 1
+
+        # Calculate sequence length for the transformer
+        # This depends on the patch size used in the transformer
+        patch_size = (
+            self.diffusion_model.patch_size
+            if hasattr(self.diffusion_model, "patch_size")
+            else (1, 2, 2)
+        )
+        seq_len = math.ceil(
+            (latent_height * latent_width)
+            / (patch_size[1] * patch_size[2])
+            * latent_frames
+        )
+
+        self.logger.debug(
+            f"Latent dimensions: {latent_frames}x{latent_height}x{latent_width}, sequence length: {seq_len}"
+        )
+
         # 3. Create initial random noise
-        # Note: This is the starting point for the diffusion process
+        # This is the starting point for the diffusion process
+        self.logger.debug(f"Initializing noise with seed {seed}")
         generator = torch.Generator(device="cpu").manual_seed(seed)
         latents = torch.randn(
             (1, 16, latent_frames, latent_height, latent_width),
@@ -233,66 +236,216 @@ class WanVideoPipeline:
             device=self.device,
             dtype=torch.float32,
         )
-        
+
         # 4. Set up the noise scheduler
+        self.logger.debug(f"Setting up scheduler with {num_inference_steps} steps")
         self.scheduler.set_timesteps(num_inference_steps, device=self.device, shift=shift)
         timesteps = self.scheduler.timesteps
-        
-        # 5. Adjust context parameters for latent space
-        # Note: Context windows allow processing longer videos with limited memory
+
+        # 5. Adjust context parameters for latent space if using context windows
+        context_queue = None
         if use_context_windows:
             # Convert from pixel-space to latent-space values
             latent_context_size = (context_size - 1) // 4 + 1
             latent_context_stride = context_stride // 4
             latent_context_overlap = context_overlap // 4
-            
-            self.logger.info("Using context windows", 
-                            context_size=latent_context_size,
-                            stride=latent_context_stride,
-                            overlap=latent_context_overlap)
-        
+
+            self.logger.info(
+                "Using context windows",
+                context_size=latent_context_size,
+                stride=latent_context_stride,
+                overlap=latent_context_overlap,
+            )
+
+            # Import context scheduler
+            from ..utils.context import (
+                get_context_scheduler,
+                uniform_looped,
+                uniform_standard,
+            )
+
+            context_scheduler = get_context_scheduler("uniform_standard")
+
         # 6. Run the denoising loop
-        # Note: This is the core of the diffusion process
-        progress_bar = tqdm(total=len(timesteps), desc="Generating video", disable=callback is not None)
-        
-        # Placeholder for the actual denoising loop
-        # In a real implementation, we would:
-        # - Run the diffusion model to predict noise
-        # - Use classifier-free guidance to combine conditional/unconditional predictions
-        # - Update the sample using the scheduler
-        # - Repeat until we reach the target timestep
-        
-        # Placeholder latents
-        latents = torch.zeros(
-            (1, 16, latent_frames, latent_height, latent_width),
-            device=self.device,
-            dtype=torch.float32,
+        # This is the core of the diffusion process
+        self.logger.info("Starting denoising process")
+        progress_bar = tqdm(
+            total=len(timesteps), desc="Generating video", disable=callback is not None
         )
-        
-        # TODO: Replace with actual denoising implementation
-        for i, t in enumerate(timesteps):
-            # Update progress
-            if callback is not None:
-                callback(i, len(timesteps), latents)
-            else:
-                progress_bar.update(1)
-        
-        # Clean up progress bar
+
+        # Move latents to device and correct dtype
+        latents = latents.to(device=self.device, dtype=self.dtype)
+
+        # Store for callback visualization
+        latent_history = []
+
+        with self.memory_tracker.track_usage("Denoising"):
+            # Loop through each timestep
+            for i, t in enumerate(timesteps):
+                # Current position in sampling process (0-1)
+                current_step_percentage = i / len(timesteps)
+
+                # Get context windows for this step if using windowing
+                if use_context_windows:
+                    context_windows = context_scheduler(
+                        i,
+                        num_inference_steps,
+                        latent_frames,
+                        latent_context_size,
+                        latent_context_stride,
+                        latent_context_overlap,
+                    )
+
+                    # Process by window to save memory
+                    noise_pred_combined = torch.zeros_like(latents)
+                    weight_combined = torch.zeros(
+                        (1, 1, latent_frames, 1, 1),
+                        device=self.device,
+                        dtype=self.dtype,
+                    )
+
+                    # Process each context window
+                    for window_idx, window_frames in enumerate(context_windows):
+                        # Get the appropriate text embedding based on window position
+                        # For multiple prompts, select based on window position
+                        prompt_idx = min(
+                            int(len(window_frames) / latent_frames * len(prompt)),
+                            len(prompt) - 1,
+                        )
+                        window_context = [text_embeds["prompt_embeds"][prompt_idx]]
+                        window_uncond = text_embeds["negative_prompt_embeds"]
+
+                        # Select relevant latent frames for this window
+                        window_latents = latents[:, :, window_frames, :, :]
+
+                        # Convert timestep to tensor
+                        timestep = torch.tensor([t], device=self.device)
+
+                        # For classifier-free guidance, do two forward passes
+                        with torch.no_grad():
+                            # Unconditional pass (if using guidance)
+                            if guidance_scale > 1.0:
+                                uncond_latents = latents[
+                                    :, :, window_frames, :, :
+                                ].clone()
+                                uncond_output = self.diffusion_model(
+                                    [uncond_latents],
+                                    timestep,
+                                    [window_uncond],
+                                    seq_len=seq_len,
+                                    is_uncond=True,
+                                    current_step_percentage=current_step_percentage,
+                                    device=self.device,
+                                )[0][0]
+
+                            # Conditional pass
+                            cond_output = self.diffusion_model(
+                                [window_latents],
+                                timestep,
+                                window_context,
+                                seq_len=seq_len,
+                                is_uncond=False,
+                                current_step_percentage=current_step_percentage,
+                                device=self.device,
+                            )[0][0]
+
+                        # Combine outputs for classifier-free guidance
+                        if guidance_scale > 1.0:
+                            model_output = uncond_output + guidance_scale * (
+                                cond_output - uncond_output
+                            )
+                        else:
+                            model_output = cond_output
+
+                        # Create blending mask for window
+                        # Smooth transition between windows
+                        window_mask = self._create_window_mask(
+                            model_output,
+                            window_frames,
+                            latent_frames,
+                            latent_context_overlap,
+                        )
+
+                        # Add to combined output with weight mask
+                        noise_pred_combined[:, :, window_frames, :, :] += (
+                            model_output * window_mask
+                        )
+                        weight_combined[:, :, window_frames, :, :] += window_mask
+
+                    # Normalize by weights to get final prediction
+                    noise_pred = noise_pred_combined / (weight_combined + 1e-8)
+
+                else:
+                    # No windowing - process all frames at once
+                    timestep = torch.tensor([t], device=self.device)
+
+                    # For classifier-free guidance, do two forward passes
+                    with torch.no_grad():
+                        # Unconditional pass (if using guidance)
+                        if guidance_scale > 1.0:
+                            uncond_output = self.diffusion_model(
+                                [latents.clone()],
+                                timestep,
+                                [text_embeds["negative_prompt_embeds"]],
+                                seq_len=seq_len,
+                                is_uncond=True,
+                                current_step_percentage=current_step_percentage,
+                                device=self.device,
+                            )[0][0]
+
+                        # Conditional pass
+                        cond_output = self.diffusion_model(
+                            [latents],
+                            timestep,
+                            [text_embeds["prompt_embeds"][0]],
+                            seq_len=seq_len,
+                            is_uncond=False,
+                            current_step_percentage=current_step_percentage,
+                            device=self.device,
+                        )[0][0]
+
+                    # Combine outputs for classifier-free guidance
+                    if guidance_scale > 1.0:
+                        noise_pred = uncond_output + guidance_scale * (
+                            cond_output - uncond_output
+                        )
+                    else:
+                        noise_pred = cond_output
+
+                # Step with scheduler
+                latents = self.scheduler.step(
+                    noise_pred, t, latents, return_dict=False
+                )[0]
+
+                # Store latent for history if requested
+                if save_latents and i % max(1, num_inference_steps // 10) == 0:
+                    latent_history.append(latents.clone().cpu())
+
+                # Update progress
+                if callback is not None:
+                    # Convert current latent to image for preview
+                    with torch.no_grad():
+                        # Just use the first frame for preview to save memory
+                        preview_latent = latents[:, :, 0:1, :, :].clone()
+                        preview = self._decode_preview(preview_latent)
+                    callback(i, len(timesteps), preview)
+                else:
+                    progress_bar.update(1)
+
+        # Close progress bar
         if not callback:
             progress_bar.close()
-        
+
         # 7. Decode the latents to pixel space
-        # TODO: Replace with actual VAE decoding
-        # In a real implementation, we would run the VAE decoder to convert
-        # latents to a pixel-space video
-        
-        # Placeholder decoded video
-        video = torch.zeros(
-            (num_frames, 3, height, width),
-            device=self.device,
-            dtype=torch.float32,
-        )
-        
+        self.logger.info("Decoding latents to video frames")
+        with self.memory_tracker.track_usage("VAE decoding"):
+            video = self._decode_latents(
+                latents,
+                enable_tiling=enable_vae_tiling,
+                tile_size=vae_tile_size,
+                tile_stride=vae_tile_stride,
+            )
+
         # 8. Format and save the output
         if save_path:
             self._save_output(
@@ -306,13 +459,13 @@ class WanVideoPipeline:
                     "steps": num_inference_steps,
                     "guidance_scale": guidance_scale,
                     "shift": shift,
-                }
+                },
             )
-        
+
         return WanVideoPipelineOutput(
             video=[video],
             fps=16,
-            latents=latents if save_latents else None,
+            latents=latent_history if save_latents else None,
             metadata={
                 "prompt": prompt,
                 "negative_prompt": negative_prompt,
@@ -323,8 +476,126 @@ class WanVideoPipeline:
                 "height": height,
                 "width": width,
                 "num_frames": num_frames,
-            }
+            },
         )
+
+    def _create_window_mask(self, tensor, frame_indices, total_frames, overlap):
+        """
+        Create a blending mask for context windows.
+
+        This creates smooth transitions between windows to avoid seams.
+
+        Args:
+            tensor: Tensor to create mask for (gets shape from this)
+            frame_indices: List of frame indices in this window
+            total_frames: Total number of frames in the video
+            overlap: Number of frames to overlap between windows
+
+        Returns:
+            Blending mask tensor
+        """
+        # Create base mask - all ones
+        mask = torch.ones_like(tensor)
+
+        # No blending needed if window covers all frames or no overlap
+        if len(frame_indices) >= total_frames or overlap <= 0:
+            return mask
+
+        # Apply left-side blending if not starting at first frame
+        if min(frame_indices) > 0:
+            # Create ramp from 0 to 1 over overlap frames
+            ramp_up = torch.linspace(0, 1, overlap, device=tensor.device)
+            # Add dimensions to match tensor shape
+            ramp_up = ramp_up.view(1, 1, -1, 1, 1)
+            # Apply to beginning of mask
+            mask[:, :, :overlap] = ramp_up
+
+        # Apply right-side blending if not ending at last frame
+        if max(frame_indices) < total_frames - 1:
+            # Create ramp from 1 to 0 over overlap frames
+            ramp_down = torch.linspace(1, 0, overlap, device=tensor.device)
+            # Add dimensions to match tensor shape
+            ramp_down = ramp_down.view(1, 1, -1, 1, 1)
+            # Apply to end of mask
+            mask[:, :, -overlap:] = ramp_down
+
+        return mask
+
+    def _decode_latents(
+        self, latents, enable_tiling=True, tile_size=(272, 272), tile_stride=(144, 128)
+    ):
+        """
+        Decode latent representations to video frames.
+
+        Args:
+            latents: Latent tensor of shape [B, C, T, H, W]
+            enable_tiling: Whether to use tiling for memory efficiency
+            tile_size: Size of tiles for tiled processing
+            tile_stride: Stride between tiles
+
+        Returns:
+            Decoded video tensor of shape [T, H, W, 3]
+        """
+        # Move VAE to device for decoding
+        self.vae.to(self.device)
+
+        # Clone and move latents to avoid modifying input
+        latents = latents.clone().to(device=self.device, dtype=self.vae.dtype)
+
+        # Scale latents if needed (depends on VAE implementation)
+        # For WanVideo VAE, no scaling needed as it's handled internally
+
+        # Decode latents to pixel space
+        with torch.no_grad():
+            if enable_tiling:
+                # Use tiled decoding to save memory
+                video = self.vae.tiled_decode(
+                    latents, self.device, tile_size=tile_size, tile_stride=tile_stride
+                )[0]
+            else:
+                # Decode directly
+                video = self.vae.decode(latents, self.device)[0]
+
+        # Move VAE back to CPU to save memory
+        self.vae.to("cpu")
+
+        # Convert to [T, H, W, 3] format with range [0, 1]
+        # VAE output is [-1, 1] range
+        video = (video + 1) / 2.0
+        video = torch.clamp(video, 0.0, 1.0)
+        video = video.permute(2, 3, 4, 1).cpu().float()
+
+        return video
+
+    def _decode_preview(self, latents):
+        """
+        Decode a single frame for preview/callback.
+
+        This is a lightweight version of decode_latents for progress updates.
+
+        Args:
+            latents: Latent tensor containing a single frame
+
+        Returns:
+            Decoded image for preview
+        """
+        # Use a context manager to temporarily move VAE to device
+        with torch.no_grad():
+            # Move VAE to device
+            self.vae.to(self.device)
+
+            # Decode just the first frame to save memory
+            image = self.vae.decode(latents, self.device)[0]
+
+            # Move VAE back to CPU
+            self.vae.to("cpu")
+
+        # Convert to [H, W, 3] format with range [0, 1]
+        image = (image + 1) / 2.0
+        image = torch.clamp(image, 0.0, 1.0)
+        image = image[0, :, 0].permute(1, 2, 0).cpu().float()
+
+        return image
     
     def _save_output(
         self,

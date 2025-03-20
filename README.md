@@ -17,6 +17,9 @@ modular_diffusion/
 ├── schedulers/
 │   ├── __init__.py
 │   ├── flow_schedulers.py     # Flow matching schedulers
+├── tests/
+│   ├── __init__.py
+│   ├── test_inference.py
 ├── utils/
 │   ├── __init__.py
 │   ├── logging.py             # Simple structured logging

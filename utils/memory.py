@@ -8,9 +8,207 @@ during inference, helping to run larger models on limited hardware.
 import gc
 import torch
 import structlog
+import torch.nn as nn
+import logging
 from typing import Dict, List, Optional, Union, Callable
 
-logger = structlog.get_logger()
+logger = logging.getLogger(__name__)
+
+class MemoryConfig:
+    """
+    Configuration for memory optimizations.
+
+    This handles various techniques to reduce GPU memory usage:
+    - Data type selection (FP32, FP16, BF16)
+    - Quantization (FP8, INT8)
+    - Torch compilation for performance
+    - Block swapping and other memory efficiency techniques
+
+    Similar to LLM quantization, these techniques help run larger models
+    on limited hardware with controlled quality trade-offs.
+    """
+
+    def __init__(
+        self,
+        dtype: torch.dtype = torch.bfloat16,  # Default dtype for computation
+        quantize_method: str = "none",  # Quantization method to use
+        use_torch_compile: bool = False,  # Whether to use torch.compile
+        compile_mode: str = "default",  # Mode for torch.compile
+        keep_norm_fp32: bool = True,  # Keep norm layers in fp32
+        offload_to_cpu: bool = False,  # Offload unused components to CPU
+        block_swap_count: int = 0,  # Number of blocks to swap
+        vae_tiling: bool = True,  # Use tiling for VAE operations
+        vae_offload: bool = True,  # Offload VAE to CPU when not in use
+        text_encoder_offload: bool = True,  # Offload text encoder when not in use
+    ):
+        """
+        Initialize memory configuration.
+
+        Args:
+            dtype: Default data type for model parameters and computation
+            quantize_method: Quantization method to apply ("none", "fp8_e4m3fn", "int8_dynamic")
+            use_torch_compile: Whether to apply torch.compile to the model
+            compile_mode: Mode for torch.compile ("default", "reduce-overhead", "max-autotune")
+            keep_norm_fp32: Whether to keep normalization layers in FP32
+            offload_to_cpu: Whether to offload unused components to CPU
+            block_swap_count: Number of transformer blocks to swap to CPU
+            vae_tiling: Whether to use tiling for VAE operations
+            vae_offload: Whether to offload VAE to CPU when not in use
+            text_encoder_offload: Whether to offload text encoder when not in use
+        """
+        self.dtype = dtype
+        self.quantize_method = quantize_method
+        self.use_torch_compile = use_torch_compile
+        self.compile_mode = compile_mode
+        self.keep_norm_fp32 = keep_norm_fp32
+        self.offload_to_cpu = offload_to_cpu
+        self.block_swap_count = block_swap_count
+        self.vae_tiling = vae_tiling
+        self.vae_offload = vae_offload
+        self.text_encoder_offload = text_encoder_offload
+
+        # Log configuration
+        logger.info(
+            "Memory configuration initialized",
+            dtype=str(dtype),
+            quantize=quantize_method,
+            compile=use_torch_compile,
+            block_swap=block_swap_count,
+        )
+
+    def apply_to_model(self, model):
+        """
+        Apply memory optimizations to a model.
+
+        Args:
+            model: PyTorch model to optimize
+
+        Returns:
+            Optimized model
+        """
+        # Start with data type conversion
+        self._convert_dtype(model)
+
+        # Apply quantization if requested
+        if self.quantize_method != "none":
+            model = self._apply_quantization(model)
+
+        # Apply torch.compile if requested
+        if self.use_torch_compile:
+            model = self._apply_torch_compile(model)
+
+        # Configure block swapping
+        if self.block_swap_count > 0 and hasattr(model, "configure_block_swap"):
+            model.configure_block_swap(self.block_swap_count)
+
+        return model
+
+    def _convert_dtype(self, model):
+        """
+        Convert model to specified dtype, with special handling for certain layers.
+
+        Args:
+            model: PyTorch model to convert
+
+        Returns:
+            Model with converted data types
+        """
+        # Parameters to keep in higher precision for stability
+        norm_keywords = {"norm", "ln", "layernorm", "rmsnorm", "bias"}
+
+        for name, param in model.named_parameters():
+            # Keep normalization layers in fp32 if specified
+            if self.keep_norm_fp32 and any(k in name.lower() for k in norm_keywords):
+                param.data = param.data.to(torch.float32)
+            else:
+                param.data = param.data.to(self.dtype)
+
+        return model
+
+    def _apply_quantization(self, model):
+        """
+        Apply quantization to model.
+
+        Args:
+            model: PyTorch model to quantize
+
+        Returns:
+            Quantized model
+        """
+        if self.quantize_method == "fp8_e4m3fn":
+            # Check if we can use torch.scaled_mm
+            if hasattr(torch, "_scaled_mm"):
+                logger.info("Applying FP8_E4M3FN quantization using torch._scaled_mm")
+                try:
+                    from modular_diffusion.utils.fp8_utils import convert_fp8_linear
+
+                    # Linear layers to keep in higher precision
+                    params_to_keep = {"norm", "layer_norm", "rmsnorm", "head", "bias"}
+                    convert_fp8_linear(model, self.dtype, params_to_keep=params_to_keep)
+                    logger.info("FP8 quantization applied successfully")
+                except Exception as e:
+                    logger.warning(f"FP8 quantization failed: {e}")
+            else:
+                logger.warning("FP8 quantization not available (requires PyTorch 2.1+)")
+
+        elif self.quantize_method == "int8_dynamic":
+            # Dynamic quantization to INT8
+            try:
+                import torch.quantization as quant
+
+                # Define quantizable operations
+                quantized_model = quant.quantize_dynamic(
+                    model, {nn.Linear}, dtype=torch.qint8
+                )
+
+                logger.info("INT8 dynamic quantization applied successfully")
+                return quantized_model
+            except Exception as e:
+                logger.warning(f"INT8 quantization failed: {e}")
+
+        # Default: return model unchanged
+        return model
+
+    def _apply_torch_compile(self, model):
+        """
+        Apply torch.compile to model.
+
+        Args:
+            model: PyTorch model to compile
+
+        Returns:
+            Compiled model
+        """
+        try:
+            # Only available in PyTorch 2.0+
+            if hasattr(torch, "compile"):
+                logger.info(f"Applying torch.compile with mode {self.compile_mode}")
+
+                # For large models, it's often better to compile only the transformer blocks
+                if hasattr(model, "blocks") and isinstance(model.blocks, nn.ModuleList):
+                    logger.info("Compiling transformer blocks individually")
+                    for i, block in enumerate(model.blocks):
+                        model.blocks[i] = torch.compile(
+                            block,
+                            mode=self.compile_mode,
+                            fullgraph=False,  # Safer option for complex models
+                        )
+                else:
+                    # Compile the whole model
+                    model = torch.compile(
+                        model,
+                        mode=self.compile_mode,
+                        fullgraph=False,  # Safer option for complex models
+                    )
+
+                logger.info("torch.compile applied successfully")
+            else:
+                logger.warning("torch.compile not available, skipping compilation")
+        except Exception as e:
+            logger.warning(f"torch.compile failed: {e}")
+
+        return model
+
 
 class MemoryTracker:
     """
@@ -26,7 +224,42 @@ class MemoryTracker:
         self.logger = logger.bind(component="MemoryTracker")
         self.peak_usage = {}
         self.snapshots = []
-    
+
+    @contextmanager
+    def track_usage(self, label: str = "Operation"):
+        """
+        Context manager to track memory usage during an operation.
+
+        Args:
+            label: Description of the operation being tracked
+
+        Yields:
+            None
+        """
+        # Record before state
+        start_stats = self.log_memory_usage(f"Before {label}")
+
+        try:
+            # Yield control to the context block
+            yield
+        finally:
+            # Record after state
+            end_stats = self.log_memory_usage(f"After {label}")
+
+            # Calculate memory difference
+            if torch.cuda.is_available():
+                for device_name in end_stats:
+                    if device_name in start_stats:
+                        diff_allocated = (
+                            end_stats[device_name]["allocated_gb"]
+                            - start_stats[device_name]["allocated_gb"]
+                        )
+                        self.logger.info(
+                            f"{label} memory impact",
+                            device=device_name,
+                            diff_gb=f"{diff_allocated:.3f}",
+                        )
+
     def log_memory_usage(self, label: str = "Current"):
         """
         Log current memory usage statistics.
