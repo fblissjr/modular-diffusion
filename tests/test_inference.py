@@ -14,9 +14,9 @@ logging.basicConfig(
 logger = logging.getLogger("inference_test")
 
 # Import our components
-from modular_diffusion.pipelines.wanvideo_pipeline import WanVideoPipeline
-from modular_diffusion.utils.memory import MemoryTracker
-from modular_diffusion.utils.memory_config import MemoryConfig
+from ..pipelines.wanvideo_pipeline import WanVideoPipeline
+from ..utils.memory import MemoryTracker
+from ..utils.memory_config import MemoryConfig
 
 def parse_args():
     """Parse command-line arguments."""

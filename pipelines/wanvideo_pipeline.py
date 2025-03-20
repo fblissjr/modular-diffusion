@@ -12,6 +12,7 @@ The pipeline implements the full diffusion process:
 4. Decode the final latents to a video
 """
 
+# pipelines/wanvideo_pipeline.py
 import os
 import torch
 import numpy as np
@@ -20,16 +21,12 @@ import structlog
 from tqdm import tqdm
 from typing import List, Dict, Tuple, Optional, Union, Any
 from dataclasses import dataclass
+import math
 
 # Import our model components
-from ..models.t5_encoder import T5TextEncoder
-# Note: We'll implement these next, but referencing them here for structure
-# from ..models.diffusion_model import WanVideoDiT
-# from ..models.vae import WanVideoVAE
-from .schedulers.flow_schedulers import FlowUniPCScheduler
-import imageio
-from ..utils.memory import MemoryConfig, MemoryTracker, DeviceManager
-import math
+from .models.t5_encoder import T5TextEncoder
+from .utils.memory import MemoryTracker
+from .utils.memory import MemoryConfig
 
 logger = structlog.get_logger()
 
@@ -49,11 +46,6 @@ class WanVideoPipelineOutput:
 class WanVideoPipeline:
     """
     Pipeline for generating videos using WanVideo models.
-    
-    This pipeline coordinates the different components (text encoder,
-    diffusion model, VAE) to implement the full generation process.
-    It handles memory management, context windowing, and other
-    optimizations.
     """
     
     def __init__(
@@ -61,44 +53,35 @@ class WanVideoPipeline:
         model_path: str,
         device: str = "cuda",
         dtype: torch.dtype = torch.bfloat16,
-        offload_blocks: int = 0,
-        t5_on_cpu: bool = False,
-        attention_mode: str = "sdpa",
-        use_compile: bool = False,
-        compile_options: Optional[Dict] = None,
+        memory_config: Optional["MemoryConfig"] = None,
     ):
-        """
-        Initialize the WanVideo pipeline.
-        
-        Args:
-            model_path: Path to the model directory
-            device: Device to run inference on ("cuda" or "cpu")
-            dtype: Data type for model weights and computation
-            offload_blocks: Number of transformer blocks to offload to CPU
-            t5_on_cpu: Whether to keep the T5 text encoder on CPU
-            attention_mode: Type of attention implementation to use
-            use_compile: Whether to use torch.compile
-            compile_options: Options for torch.compile
-        """
-        self.logger = logger.bind(component="WanVideoPipeline")
+        """Initialize the WanVideo pipeline."""
+        self.logger = structlog.get_logger().bind(component="WanVideoPipeline")
         self.device = torch.device(device)
         self.dtype = dtype
-        
-        self.logger.info("Initializing WanVideo pipeline", 
-                        model_path=model_path,
-                        device=str(device),
-                        offload_blocks=offload_blocks)
+        self.model_path = model_path
+
+        # Initialize memory tracker
+        self.memory_tracker = MemoryTracker()
+
+        # Apply memory configuration if provided
+        self.memory_config = memory_config or MemoryConfig(dtype=dtype)
+
+        self.logger.info(
+            "Initializing WanVideo pipeline", model_path=model_path, device=str(device)
+        )
         
         # Determine the model type (t2v or i2v)
         self.model_type = self._determine_model_type(model_path)
         
         # Load the text encoder
-        self.text_encoder = T5TextEncoder(
-            model_path=model_path,
-            device=device,
-            dtype=dtype,
-            use_cpu=t5_on_cpu
-        )
+        with self.memory_tracker.track_usage("Loading text encoder"):
+            self.text_encoder = T5TextEncoder(
+                model_path=model_path,
+                device=device,
+                dtype=dtype,
+                use_cpu=self.memory_config.text_encoder_offload,
+            )
         
         # TODO: Load the diffusion model
         # self.diffusion_model = WanVideoDiT(...)
@@ -243,7 +226,6 @@ class WanVideoPipeline:
         timesteps = self.scheduler.timesteps
 
         # 5. Adjust context parameters for latent space if using context windows
-        context_queue = None
         if use_context_windows:
             # Convert from pixel-space to latent-space values
             latent_context_size = (context_size - 1) // 4 + 1
@@ -263,7 +245,6 @@ class WanVideoPipeline:
                 uniform_looped,
                 uniform_standard,
             )
-
             context_scheduler = get_context_scheduler("uniform_standard")
 
         # 6. Run the denoising loop
@@ -483,7 +464,8 @@ class WanVideoPipeline:
         """
         Create a blending mask for context windows.
 
-        This creates smooth transitions between windows to avoid seams.
+        This creates smooth transitions between windows to avoid seams when
+        processing video in chunks, similar to sliding window attention in LLMs.
 
         Args:
             tensor: Tensor to create mask for (gets shape from this)
@@ -614,8 +596,7 @@ class WanVideoPipeline:
             metadata: Metadata about the generation process
         """
         # Convert to numpy array in correct format for video
-        video_np = video.permute(0, 2, 3, 1).cpu().numpy()  # [T, H, W, C]
-        video_np = np.clip(video_np * 255, 0, 255).astype(np.uint8)
+        video_np = (video * 255).astype(np.uint8)
         
         # Create output directory if needed
         os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
@@ -623,10 +604,11 @@ class WanVideoPipeline:
         # Save using appropriate format
         if output_type == "mp4":
             try:
-                import imageio.v3 as imageio
-                imageio.imwrite(
-                    save_path, 
-                    video_np, 
+                import imageio
+
+                imageio.mimsave(
+                    save_path,
+                    video_np,
                     fps=16,
                     quality=7,  # Good quality with reasonable file size
                 )
@@ -647,13 +629,9 @@ class WanVideoPipeline:
         
         elif output_type == "gif":
             try:
-                import imageio.v3 as imageio
-                imageio.imwrite(
-                    save_path,
-                    video_np,
-                    format="gif",
-                    fps=16
-                )
+                import imageio
+
+                imageio.mimsave(save_path, video_np, format="gif", fps=16)
                 self.logger.info("Saved GIF", path=save_path)
             except ImportError:
                 self.logger.error("Cannot save GIF - imageio not installed")

@@ -1,3 +1,4 @@
+# utils/memory.py
 """
 Memory management utilities for working with large models.
 
@@ -5,6 +6,7 @@ This module provides tools for tracking and optimizing memory usage
 during inference, helping to run larger models on limited hardware.
 """
 
+from contextlib import contextmanager
 import gc
 import torch
 import structlog
