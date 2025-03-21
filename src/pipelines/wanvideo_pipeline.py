@@ -38,7 +38,6 @@ from src.schedulers.flow_scheduler import FlowUniPCScheduler
 from src.schedulers.flow_dpm_scheduler import FlowDPMScheduler
 from diffusers import EulerDiscreteScheduler
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -270,69 +269,7 @@ class WanVideoPipeline:
                 "offload_device": torch.device("cpu"),
                 "attention_mode": self.config.memory.efficient_attention or "sdpa",
             }
-            pass
 
-        # Check for transformer directory with sharded weights first
-        transformer_dir = self.model_path / "transformer"
-        if (
-            transformer_dir.exists()
-            and (
-                transformer_dir / "diffusion_pytorch_model.safetensors.index.json"
-            ).exists()
-        ):
-            logger.info(f"Found sharded diffusion model weights in {transformer_dir}")
-
-            # Load the config to ensure we have the right parameters
-            if (transformer_dir / "config.json").exists():
-                with open(transformer_dir / "config.json", "r") as f:
-                    try:
-                        config_data = json.load(f)
-                        # Update model_config with any parameters from config file
-                        # (careful not to override critical values)
-                    except json.JSONDecodeError:
-                        logger.warning(
-                            "Failed to parse config.json, using default parameters"
-                        )
-
-            # Create model with your config
-            model = WanDiT(**model_config)
-
-            # Load weights
-            try:
-                # Get the index file to find all shards
-                with open(
-                    transformer_dir / "diffusion_pytorch_model.safetensors.index.json",
-                    "r",
-                ) as f:
-                    index = json.load(f)
-
-                # Load each shard and update state dict
-                state_dict = {}
-                for shard_file, weight_map in index.get("weight_map", {}).items():
-                    shard_path = transformer_dir / shard_file
-                    if shard_path.exists():
-                        logger.info(f"Loading shard: {shard_file}")
-                        shard_dict = load_file(str(shard_path))
-                        state_dict.update(shard_dict)
-                    else:
-                        logger.warning(f"Shard file not found: {shard_file}")
-
-                # Now proceed with your existing loading logic
-                missing_keys, unexpected_keys = model.load_state_dict(
-                    state_dict, strict=False
-                )
-
-            except Exception as e:
-                logger.error(f"Error loading sharded weights: {e}")
-                # Fall back to searching for single files
-                pass
-            else:
-                # If we successfully loaded the sharded weights, apply optimizations and return
-                logger.info("Successfully loaded sharded diffusion model")
-                model = self.memory_manager.optimize_model(model)
-                return model
-
-        # Fall back to the existing code for single files
         # Find diffusion model weights
         model_paths = [
             self.model_path / "diffusion_model.safetensors",
