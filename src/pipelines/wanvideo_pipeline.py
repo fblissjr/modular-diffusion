@@ -23,9 +23,21 @@ from typing import List, Dict, Tuple, Optional, Union, Any
 from dataclasses import dataclass
 import math
 from pathlib import Path
+import json
+import imageio
+from safetensors.torch import load_file
 
-# Import our configuration
-from ..utils.config import WanVideoConfig, MemoryConfig, ContextConfig, TeaCacheConfig
+from src.utils.context import create_context_strategy
+from src.utils.memory import MemoryManager, MemoryTracker
+from src.utils.config import WanVideoConfig
+from src.utils.teacache import TeaCache
+from src.models.t5_encoder import T5TextEncoder
+from src.models.vae import WanVideoVAE
+from src.models.diffusion_model import WanDiT
+from src.schedulers.flow_scheduler import FlowUniPCScheduler
+from src.schedulers.flow_dpm_scheduler import FlowDPMScheduler
+from diffusers import EulerDiscreteScheduler
+
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +72,7 @@ class WanVideoPipeline:
     for the diffusion process where we gradually denoise latents
     instead of generating tokens one by one.
     """
-    
+
     def __init__(
         self,
         model_path: str,
@@ -107,7 +119,6 @@ class WanVideoPipeline:
         )
 
         # Set up memory management
-        from ..utils.memory import MemoryManager, MemoryTracker
 
         self.memory_tracker = MemoryTracker()
         self.memory_manager = MemoryManager(
@@ -137,9 +148,6 @@ class WanVideoPipeline:
             self.teacache = (
                 self._setup_teacache() if self.config.teacache.enabled else None
             )
-
-        # Set up context strategy
-        from ..utils.context import create_context_strategy
 
         self.context_strategy = (
             create_context_strategy(self.config.context, self.device)
@@ -172,8 +180,6 @@ class WanVideoPipeline:
         # Try to read from config file
         config_path = self.model_path / "config.json"
         if config_path.exists():
-            import json
-
             with open(config_path, "r") as f:
                 try:
                     config = json.load(f)
@@ -195,7 +201,6 @@ class WanVideoPipeline:
         Returns:
             T5 text encoder model
         """
-        from ..models.t5_encoder import T5TextEncoder
 
         logger.info("Loading T5 text encoder")
 
@@ -223,7 +228,6 @@ class WanVideoPipeline:
         Returns:
             WanDiT diffusion model
         """
-        from ..models.diffusion_model import WanDiT
 
         logger.info("Loading diffusion model")
 
@@ -266,7 +270,69 @@ class WanVideoPipeline:
                 "offload_device": torch.device("cpu"),
                 "attention_mode": self.config.memory.efficient_attention or "sdpa",
             }
+            pass
 
+        # Check for transformer directory with sharded weights first
+        transformer_dir = self.model_path / "transformer"
+        if (
+            transformer_dir.exists()
+            and (
+                transformer_dir / "diffusion_pytorch_model.safetensors.index.json"
+            ).exists()
+        ):
+            logger.info(f"Found sharded diffusion model weights in {transformer_dir}")
+
+            # Load the config to ensure we have the right parameters
+            if (transformer_dir / "config.json").exists():
+                with open(transformer_dir / "config.json", "r") as f:
+                    try:
+                        config_data = json.load(f)
+                        # Update model_config with any parameters from config file
+                        # (careful not to override critical values)
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            "Failed to parse config.json, using default parameters"
+                        )
+
+            # Create model with your config
+            model = WanDiT(**model_config)
+
+            # Load weights
+            try:
+                # Get the index file to find all shards
+                with open(
+                    transformer_dir / "diffusion_pytorch_model.safetensors.index.json",
+                    "r",
+                ) as f:
+                    index = json.load(f)
+
+                # Load each shard and update state dict
+                state_dict = {}
+                for shard_file, weight_map in index.get("weight_map", {}).items():
+                    shard_path = transformer_dir / shard_file
+                    if shard_path.exists():
+                        logger.info(f"Loading shard: {shard_file}")
+                        shard_dict = load_file(str(shard_path))
+                        state_dict.update(shard_dict)
+                    else:
+                        logger.warning(f"Shard file not found: {shard_file}")
+
+                # Now proceed with your existing loading logic
+                missing_keys, unexpected_keys = model.load_state_dict(
+                    state_dict, strict=False
+                )
+
+            except Exception as e:
+                logger.error(f"Error loading sharded weights: {e}")
+                # Fall back to searching for single files
+                pass
+            else:
+                # If we successfully loaded the sharded weights, apply optimizations and return
+                logger.info("Successfully loaded sharded diffusion model")
+                model = self.memory_manager.optimize_model(model)
+                return model
+
+        # Fall back to the existing code for single files
         # Find diffusion model weights
         model_paths = [
             self.model_path / "diffusion_model.safetensors",
@@ -288,7 +354,6 @@ class WanVideoPipeline:
         # Load weights
         logger.info(f"Loading diffusion model weights from {model_path}")
         try:
-            from safetensors.torch import load_file
 
             state_dict = load_file(str(model_path))
         except ImportError:
@@ -321,7 +386,6 @@ class WanVideoPipeline:
         Returns:
             WanVideoVAE model
         """
-        from ..models.vae import WanVideoVAE
 
         logger.info("Loading VAE")
 
@@ -345,8 +409,6 @@ class WanVideoPipeline:
         logger.info(f"Loading VAE weights from {vae_path}")
         try:
             if str(vae_path).endswith(".safetensors"):
-                from safetensors.torch import load_file
-
                 vae_state_dict = load_file(str(vae_path))
             else:
                 vae_state_dict = torch.load(str(vae_path), map_location="cpu")
@@ -383,16 +445,12 @@ class WanVideoPipeline:
 
         # Create scheduler based on type
         if scheduler_type == "unipc":
-            from ..schedulers.flow_scheduler import FlowUniPCScheduler
-
             scheduler = FlowUniPCScheduler(
                 num_train_timesteps=1000,
                 prediction_type="flow_prediction",
                 shift=self.config.generation.shift,
             )
         elif scheduler_type == "dpm++" or scheduler_type == "dpm++_sde":
-            from ..schedulers.flow_dpm_scheduler import FlowDPMScheduler
-
             scheduler = FlowDPMScheduler(
                 num_train_timesteps=1000,
                 prediction_type="flow_prediction",
@@ -402,10 +460,7 @@ class WanVideoPipeline:
                 else "sde-dpmsolver++",
             )
         elif scheduler_type == "euler":
-            # Import a simple Euler scheduler if available
             try:
-                from diffusers import EulerDiscreteScheduler
-
                 scheduler = EulerDiscreteScheduler(
                     num_train_timesteps=1000,
                     beta_start=0.00085,
@@ -416,8 +471,6 @@ class WanVideoPipeline:
                 logger.warning(
                     "EulerDiscreteScheduler not available, falling back to FlowUniPCScheduler"
                 )
-                from ..schedulers.flow_scheduler import FlowUniPCScheduler
-
                 scheduler = FlowUniPCScheduler(
                     num_train_timesteps=1000,
                     prediction_type="flow_prediction",
@@ -428,7 +481,6 @@ class WanVideoPipeline:
             logger.warning(
                 f"Unknown scheduler type: {scheduler_type}, falling back to FlowUniPCScheduler"
             )
-            from ..schedulers.flow_scheduler import FlowUniPCScheduler
 
             scheduler = FlowUniPCScheduler(
                 num_train_timesteps=1000,
@@ -445,7 +497,6 @@ class WanVideoPipeline:
         Returns:
             TeaCache instance
         """
-        from ..utils.teacache import TeaCache
 
         logger.info("Setting up TeaCache")
 
@@ -934,7 +985,6 @@ class WanVideoPipeline:
         # Save using appropriate format based on extension
         if output_path.suffix.lower() in [".mp4", ".mkv", ".avi", ".mov"]:
             try:
-                import imageio
 
                 logger.info(f"Saving video to {output_path}")
                 imageio.mimsave(
@@ -946,7 +996,6 @@ class WanVideoPipeline:
                 
                 # Save metadata alongside video
                 if metadata:
-                    import json
 
                     metadata_path = output_path.with_suffix(".json")
                     with open(metadata_path, "w") as f:
@@ -958,7 +1007,6 @@ class WanVideoPipeline:
                 logger.info("Install with: pip install imageio[ffmpeg]")
         elif output_path.suffix.lower() == ".gif":
             try:
-                import imageio
 
                 logger.info(f"Saving GIF to {output_path}")
                 imageio.mimsave(str(output_path), video_np, format="GIF", fps=fps)

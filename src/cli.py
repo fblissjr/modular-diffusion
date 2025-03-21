@@ -9,6 +9,15 @@ from pathlib import Path
 import random
 from typing import Dict, Any, Optional, List
 
+from src.utils.config import (
+    WanVideoConfig,
+    MemoryConfig,
+    ContextConfig,
+    TeaCacheConfig,
+    GenerationConfig,
+)
+from src.pipelines.wanvideo_pipeline import WanVideoPipeline
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -305,15 +314,6 @@ def main():
     output_path = args.output or auto_output_path(args.prompt)
     logger.info(f"Output will be saved to: {output_path}")
 
-    # Import our configuration
-    from .utils.config import (
-        WanVideoConfig,
-        MemoryConfig,
-        ContextConfig,
-        TeaCacheConfig,
-        GenerationConfig,
-    )
-
     # Create configuration
     memory_config = MemoryConfig(
         block_swap_count=args.block_swap,
@@ -359,9 +359,6 @@ def main():
         teacache=teacache_config,
         generation=generation_config,
     )
-
-    # Load the pipeline
-    from modular_diffusion.pipelines.wanvideo_pipeline import WanVideoPipeline
 
     logger.info(f"Loading model from {args.model_path}")
 

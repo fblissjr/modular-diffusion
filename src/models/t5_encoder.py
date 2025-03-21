@@ -16,6 +16,7 @@ import torch
 import structlog
 from typing import List, Dict, Optional, Union, Tuple
 from transformers import AutoTokenizer, T5EncoderModel
+from safetensors.torch import load_file
 
 logger = structlog.get_logger()
 
@@ -72,42 +73,54 @@ class T5TextEncoder:
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
         
         # Load model based on quantization settings
-        if quantization != "disabled":
+        if quantization != "disabled" and quantization.lower() != "none":
             self._load_quantized(model_path, quantization)
         else:
             self._load_standard(model_path)
-        
+
         self.logger.info("T5 text encoder loaded successfully")
-    
+
     def _load_standard(self, model_path: str):
         """
         Load T5 model with standard precision (no quantization).
-        
+
         Args:
             model_path: Path to the model directory
         """
-        # Check different possible paths for the T5 encoder
+        # Check for sharded models first (standard HF format with index)
+        index_path = os.path.join(model_path, "model.safetensors.index.json")
+        if os.path.exists(index_path):
+            self.logger.info("Found sharded model weights with index", path=index_path)
+            # For sharded weights, use HF's from_pretrained which handles the indexing
+            self.model = T5EncoderModel.from_pretrained(
+                model_path,
+                device_map=self.device if not self.device.type == "cpu" else None,
+                torch_dtype=self.dtype
+            )
+            self.model.eval().requires_grad_(False)
+            return
+
+        # Check different possible paths for non-sharded models
         possible_paths = [
-            os.path.join(model_path, "text_encoder/model.safetensors"),
+            os.path.join(model_path, "model.safetensors"),
             os.path.join(model_path, "text_encoder.safetensors"),
             os.path.join(model_path, "umt5-xxl-enc-bf16.pth")
         ]
-        
+
         model_file = None
         for path in possible_paths:
             if os.path.exists(path):
                 model_file = path
                 self.logger.info("Found model weights", path=model_file)
                 break
-        
+
         if model_file is None:
             self.logger.error("Could not find T5 model weights in any expected location")
             raise FileNotFoundError(f"T5 model weights not found in {model_path}")
-        
+
         # Load model weights
         # Note: The weights can be in either PyTorch's native format or safetensors
-        if model_file.endswith('.safetensors'):
-            from safetensors.torch import load_file
+        if model_file.endswith(".safetensors"):
             state_dict = load_file(model_file)
         else:
             state_dict = torch.load(model_file, map_location="cpu")
