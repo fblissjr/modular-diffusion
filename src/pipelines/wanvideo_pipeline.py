@@ -233,7 +233,7 @@ class WanVideoPipeline:
         from src.configs import get_model_config
 
         # Get the appropriate config for this model
-        model_config = get_model_config(self.model_path, self.model_type)
+        model_config = get_model_config(self.model_path, "wanvideo")
 
         # Convert config to model parameters
         dit_config = {
@@ -254,7 +254,7 @@ class WanVideoPipeline:
             "attention_mode": self.config.memory.efficient_attention or "sdpa",
         }
 
-        logger.info(f"Using model config: {model_config.__name__}")
+        logger.info(f"Using model config: {model_config.name}")
 
         # Check for sharded models with index files
         possible_index_paths = [
@@ -265,7 +265,7 @@ class WanVideoPipeline:
             self.model_path / "model.safetensors.index.json",
         ]
 
-        # Try to find an index file first
+        # Find the index file
         index_path = None
         for path in possible_index_paths:
             if path.exists():
@@ -274,7 +274,7 @@ class WanVideoPipeline:
                 break
 
         # Create the model
-        model = WanDiT(**model_config)
+        model = WanDiT(**dit_config)
 
         if index_path:
             # Handle sharded models
