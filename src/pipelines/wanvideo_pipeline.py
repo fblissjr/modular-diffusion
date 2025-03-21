@@ -227,78 +227,109 @@ class WanVideoPipeline:
         Returns:
             WanDiT diffusion model
         """
-
         logger.info("Loading diffusion model")
 
-        # Determine model parameters based on type
-        if self.model_type == "t2v":
-            in_dim = 16  # Standard latent dimension
+        # Import the config factory
+        from src.configs import get_model_config
 
-            # Detect model size from path (14B or 1.3B)
-            is_14b = "14B" in str(self.model_path) or "14b" in str(self.model_path)
-            model_config = {
-                "model_type": "t2v",
-                "in_dim": in_dim,
-                "dim": 5120 if is_14b else 1536,
-                "ffn_dim": 13824 if is_14b else 8960,
-                "freq_dim": 256,  # For time embeddings
-                "text_dim": 4096,  # T5 output dimension
-                "out_dim": 16,  # Output latent dimension
-                "num_heads": 40 if is_14b else 12,
-                "num_layers": 40 if is_14b else 30,
-                "patch_size": (1, 2, 2),
-                "main_device": self.device,
-                "offload_device": torch.device("cpu"),
-                "attention_mode": self.config.memory.efficient_attention or "sdpa",
-            }
-        else:  # i2v
-            in_dim = 16
-            is_14b = "14B" in str(self.model_path) or "14b" in str(self.model_path)
-            model_config = {
-                "model_type": "i2v",
-                "in_dim": in_dim,
-                "dim": 5120,
-                "ffn_dim": 13824,
-                "freq_dim": 256,
-                "text_dim": 4096,
-                "out_dim": 16,
-                "num_heads": 40,
-                "num_layers": 40,
-                "patch_size": (1, 2, 2),
-                "main_device": self.device,
-                "offload_device": torch.device("cpu"),
-                "attention_mode": self.config.memory.efficient_attention or "sdpa",
-            }
+        # Get the appropriate config for this model
+        model_config = get_model_config(self.model_path, self.model_type)
 
-        # Find diffusion model weights
-        model_paths = [
-            self.model_path / "diffusion_model.safetensors",
-            self.model_path / "transformer.safetensors",
-            self.model_path / "model.safetensors",
+        # Convert config to model parameters
+        dit_config = {
+            "model_type": self.model_type,
+            "in_dim": 16,  # Standard latent dimension
+            "dim": model_config.dim,
+            "ffn_dim": model_config.ffn_dim,
+            "freq_dim": model_config.freq_dim,
+            "text_dim": 4096,  # T5 output dimension
+            "out_dim": 16,  # Output latent dimension
+            "num_heads": model_config.num_heads,
+            "num_layers": model_config.num_layers,
+            "patch_size": model_config.patch_size,
+            "qk_norm": model_config.qk_norm,
+            "cross_attn_norm": model_config.cross_attn_norm,
+            "main_device": self.device,
+            "offload_device": torch.device("cpu"),
+            "attention_mode": self.config.memory.efficient_attention or "sdpa",
+        }
+
+        logger.info(f"Using model config: {model_config.__name__}")
+
+        # Check for sharded models with index files
+        possible_index_paths = [
+            self.model_path
+            / "transformer"
+            / "diffusion_pytorch_model.safetensors.index.json",
+            self.model_path / "diffusion_pytorch_model.safetensors.index.json",
+            self.model_path / "model.safetensors.index.json",
         ]
 
-        model_path = None
-        for path in model_paths:
+        # Try to find an index file first
+        index_path = None
+        for path in possible_index_paths:
             if path.exists():
-                model_path = path
+                index_path = path
+                logger.info(f"Found sharded diffusion model with index at {index_path}")
                 break
 
-        if model_path is None:
-            raise FileNotFoundError(
-                f"Could not find diffusion model weights in {self.model_path}"
-            )
-
-        # Load weights
-        logger.info(f"Loading diffusion model weights from {model_path}")
-        try:
-
-            state_dict = load_file(str(model_path))
-        except ImportError:
-            logger.warning("safetensors not available, falling back to torch.load")
-            state_dict = torch.load(str(model_path), map_location="cpu")
-
-        # Create model
+        # Create the model
         model = WanDiT(**model_config)
+
+        if index_path:
+            # Handle sharded models
+            import json
+
+            # Read the index file
+            with open(index_path, "r") as f:
+                index_data = json.load(f)
+
+            # Get the weight files
+            weight_map = index_data.get("weight_map", {})
+
+            # Determine the base directory
+            base_dir = index_path.parent
+
+            # Load each shard and update the state dict
+            state_dict = {}
+            for param_name, filename in weight_map.items():
+                shard_path = base_dir / filename
+                if shard_path.exists():
+                    logger.info(f"Loading shard: {filename}")
+                    try:
+                        shard_dict = load_file(str(shard_path))
+                        # Add the parameters from this shard
+                        for k, v in shard_dict.items():
+                            state_dict[k] = v
+                    except Exception as e:
+                        logger.error(f"Error loading shard {filename}: {e}")
+        else:
+            # Try non-sharded model files
+            model_paths = [
+                self.model_path / "diffusion_model.safetensors",
+                self.model_path / "transformer" / "diffusion_pytorch_model.safetensors",
+                self.model_path / "transformer.safetensors",
+                self.model_path / "model.safetensors",
+            ]
+
+            model_path = None
+            for path in model_paths:
+                if path.exists():
+                    model_path = path
+                    break
+
+            if model_path is None:
+                raise FileNotFoundError(
+                    f"Could not find diffusion model weights in {self.model_path}"
+                )
+
+            # Load weights
+            logger.info(f"Loading diffusion model weights from {model_path}")
+            try:
+                state_dict = load_file(str(model_path))
+            except ImportError:
+                logger.warning("safetensors not available, falling back to torch.load")
+                state_dict = torch.load(str(model_path), map_location="cpu")
 
         # Load weights
         missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
@@ -323,14 +354,20 @@ class WanVideoPipeline:
         Returns:
             WanVideoVAE model
         """
-
         logger.info("Loading VAE")
+
+        # Import the config factory
+        from src.configs import get_model_config
+
+        # Get the appropriate config for this model
+        model_config = get_model_config(self.model_path, self.model_type)
 
         # Find VAE weights
         vae_paths = [
+            self.model_path / "vae" / "diffusion_pytorch_model.safetensors",
             self.model_path / "vae.safetensors",
             self.model_path / "vae" / "model.safetensors",
-            self.model_path / "Wan2.1_VAE.pth",
+            self.model_path / model_config.vae_checkpoint,
         ]
 
         vae_path = None
@@ -352,11 +389,15 @@ class WanVideoPipeline:
         except Exception as e:
             raise RuntimeError(f"Failed to load VAE weights: {e}")
 
-        # Create model
+        # Create model with config parameters
         vae = WanVideoVAE(
             dim=96,  # Default for WanVideo VAE
             z_dim=16,  # Latent dimension
             dtype=self.dtype,
+            # Use config values for VAE stride
+            vae_stride=model_config.vae_stride
+            if hasattr(model_config, "vae_stride")
+            else (4, 8, 8),
         )
 
         # Load weights

@@ -23,16 +23,16 @@ try:
     
     # Create minimal config - adjust model_path!
     config = WanVideoConfig(
-        model_path="./checkpoints/Wan-AI_Wan2.1-T2V-1.3B-Diffusers",
+        model_path="./checkpoints/Wan2.1-T2V-1.3B-Diffusers",
         device="cuda" if torch.cuda.is_available() else "cpu",
         dtype="bf16" if torch.cuda.is_bf16_supported() else "fp16",
         # Minimal generation config
         generation=GenerationConfig(
             height=320,  # Lower for testing
-            width=576,   # Lower for testing
+            width=576,  # Lower for testing
             num_frames=16,  # Fewer frames for testing
-            num_inference_steps=10  # Fewer steps for testing
-        )
+            num_inference_steps=10,  # Fewer steps for testing
+        ),
     )
     
     logger.info("Initializing pipeline...")
