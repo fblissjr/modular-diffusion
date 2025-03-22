@@ -1,7 +1,5 @@
 # src/configs/__init__.py
-from src.configs.factory import ConfigFactory
-from .models.wanvideo import register_wanvideo_configs
-
+from .factory import ConfigFactory
 
 def get_model_config(model_path, model_type=None):
     """
@@ -11,9 +9,11 @@ def get_model_config(model_path, model_type=None):
     """
     return ConfigFactory.get_config(model_path, model_type)
 
-
 # Import and register model config handlers
 try:
+    # Only import the register function to avoid circular imports
+    from .models.wanvideo import register_wanvideo_configs
     register_wanvideo_configs()
-except ImportError:
-    pass
+except ImportError as e:
+    import logging
+    logging.getLogger(__name__).warning(f"Failed to register configs: {e}")

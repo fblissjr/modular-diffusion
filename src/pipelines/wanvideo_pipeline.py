@@ -292,10 +292,19 @@ class WanVideoPipeline:
 
             # Load each shard and update the state dict
             state_dict = {}
+            loaded_shards = set()  # Track which shards we've already loaded
+
             for param_name, filename in weight_map.items():
                 shard_path = base_dir / filename
+                
+                # Skip already loaded shards
+                if filename in loaded_shards:
+                    continue
+                    
                 if shard_path.exists():
                     logger.info(f"Loading shard: {filename}")
+                    loaded_shards.add(filename)  # Mark as loaded
+                    
                     try:
                         shard_dict = load_file(str(shard_path))
                         # Add the parameters from this shard
@@ -303,6 +312,7 @@ class WanVideoPipeline:
                             state_dict[k] = v
                     except Exception as e:
                         logger.error(f"Error loading shard {filename}: {e}")
+                
         else:
             # Try non-sharded model files
             model_paths = [
@@ -331,16 +341,27 @@ class WanVideoPipeline:
                 logger.warning("safetensors not available, falling back to torch.load")
                 state_dict = torch.load(str(model_path), map_location="cpu")
 
-        # Load weights
-        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
-        if missing_keys:
-            logger.warning(
-                f"Missing keys when loading diffusion model: {len(missing_keys)} keys"
-            )
-        if unexpected_keys:
-            logger.warning(
-                f"Unexpected keys when loading diffusion model: {len(unexpected_keys)} keys"
-            )
+            # Load weights
+            missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+
+            # Log a sample of missing/unexpected keys for debugging
+            if missing_keys:
+                logger.warning(
+                    f"Missing keys when loading diffusion model: {len(missing_keys)} keys. "
+                    f"First few missing keys: {missing_keys[:5]}"
+                )
+            if unexpected_keys:
+                logger.warning(
+                    f"Unexpected keys when loading diffusion model: {len(unexpected_keys)} keys. "
+                    f"First few unexpected keys: {unexpected_keys[:5]}"
+                )
+
+        # Apply model weights
+        model.load_state_dict(state_dict, strict=False)
+
+        # Clear state dict to free memory
+        del state_dict
+        torch.cuda.empty_cache()
 
         # Apply memory optimizations
         model = self.memory_manager.optimize_model(model)
@@ -357,23 +378,32 @@ class WanVideoPipeline:
         logger.info("Loading VAE")
 
         # Import the config factory
-        from src.configs import get_model_config
-
-        # Get the appropriate config for this model
-        model_config = get_model_config(self.model_path, self.model_type)
+        try:
+            from src.configs import get_model_config
+            
+            # Get the appropriate config for this model
+            model_config = get_model_config(self.model_path, "wanvideo")
+            logger.info(f"Using VAE config from: {getattr(model_config, 'name', 'Unknown')}")
+        except Exception as e:
+            logger.warning(f"Error loading config: {e}, using defaults")
+            model_config = None
 
         # Find VAE weights
         vae_paths = [
             self.model_path / "vae" / "diffusion_pytorch_model.safetensors",
             self.model_path / "vae.safetensors",
             self.model_path / "vae" / "model.safetensors",
-            self.model_path / model_config.vae_checkpoint,
         ]
+        
+        # Add config path if available
+        if model_config and hasattr(model_config, 'vae_checkpoint'):
+            vae_paths.append(self.model_path / model_config.vae_checkpoint)
 
         vae_path = None
         for path in vae_paths:
             if path.exists():
                 vae_path = path
+                logger.info(f"Found VAE weights at {vae_path}")
                 break
 
         if vae_path is None:
@@ -389,15 +419,17 @@ class WanVideoPipeline:
         except Exception as e:
             raise RuntimeError(f"Failed to load VAE weights: {e}")
 
-        # Create model with config parameters
+        # Get VAE stride from config if available
+        vae_stride = (4, 8, 8)  # Default VAE stride
+        if model_config and hasattr(model_config, 'vae_stride'):
+            vae_stride = model_config.vae_stride
+
+        # Create model
         vae = WanVideoVAE(
             dim=96,  # Default for WanVideo VAE
             z_dim=16,  # Latent dimension
             dtype=self.dtype,
-            # Use config values for VAE stride
-            vae_stride=model_config.vae_stride
-            if hasattr(model_config, "vae_stride")
-            else (4, 8, 8),
+            vae_stride=vae_stride
         )
 
         # Load weights

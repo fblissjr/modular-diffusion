@@ -30,6 +30,7 @@ class MemoryConfig:
     use_torch_compile: bool = False  # Use torch.compile for faster execution
     compile_mode: str = "default"  # "default", "reduce-overhead", "max-autotune"
     keep_norm_fp32: bool = True  # Keep normalization layers in FP32
+    dtype: torch.dtype = None  # Data type for model parameters
 
 @dataclass
 class ContextConfig:
@@ -118,6 +119,12 @@ class WanVideoConfig:
     context: ContextConfig = field(default_factory=ContextConfig)
     teacache: TeaCacheConfig = field(default_factory=TeaCacheConfig)
     generation: GenerationConfig = field(default_factory=GenerationConfig)
+    
+    def __post_init__(self):
+        """Initialize dependent configurations after dataclass initialization."""
+        # Convert string dtype to torch dtype and update memory config
+        torch_dtype = self.to_torch_dtype()
+        self.memory.dtype = torch_dtype
     
     def to_torch_dtype(self) -> torch.dtype:
         """Convert dtype string to torch.dtype."""

@@ -32,10 +32,19 @@ class ConfigFactory:
         
         # Use registered handler for this model type
         if model_type in cls._registry:
-            return cls._registry[model_type](model_path, model_type)
+            config = cls._registry[model_type](model_path, model_type)
+            return config
+        
+        # For backwards compatibility, check if a different capitalization exists
+        for key in cls._registry:
+            if key.lower() == model_type.lower():
+                logger.info(f"Using case-insensitive match for model type: {key}")
+                return cls._registry[key](model_path, model_type)
         
         logger.warning(f"Unknown model type: {model_type}, using generic config")
-        return {}
+        # Return an object with expected attributes to avoid AttributeError
+        from .models.wanvideo.wan_t2v_1_3B import t2v_1_3B
+        return t2v_1_3B  # Fallback to a known config
     
     @classmethod
     def _infer_model_type(cls, model_path):

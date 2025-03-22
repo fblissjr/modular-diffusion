@@ -1,10 +1,11 @@
 # src/configs/models/wanvideo/__init__.py
+
 import os
 import copy
 from pathlib import Path
 
 # Set environment variables
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
 # Import configs
 from .shared_config import wan_shared_cfg
@@ -14,23 +15,23 @@ from .wan_t2v_14B import t2v_14B
 
 # Create t2i_14B config (same as t2v_14B)
 t2i_14B = copy.deepcopy(t2v_14B)
-t2i_14B.name = "Wan T2I 14B"
+t2i_14B.name = 'Wan T2I 14B'
 
 # Config registry
 WAN_CONFIGS = {
-    "t2v-14B": t2v_14B,
-    "t2v-1.3B": t2v_1_3B,
-    "i2v-14B": i2v_14B,
-    "t2i-14B": t2i_14B,
+    't2v-14B': t2v_14B,
+    't2v-1.3B': t2v_1_3B,
+    'i2v-14B': i2v_14B,
+    't2i-14B': t2i_14B,
 }
 
 # Video resolution configs
 SIZE_CONFIGS = {
-    "720*1280": (720, 1280),
-    "1280*720": (1280, 720),
-    "480*832": (480, 832),
-    "832*480": (832, 480),
-    "1024*1024": (1024, 1024),
+    '720*1280': (720, 1280),
+    '1280*720': (1280, 720),
+    '480*832': (480, 832),
+    '832*480': (832, 480),
+    '1024*1024': (1024, 1024),
 }
 
 # Supported sizes for each model
@@ -78,9 +79,12 @@ def get_wan_config(model_path, model_type=None):
     # Return the config if it exists, otherwise use the default
     return WAN_CONFIGS.get(config_key, t2v_1_3B)
 
-
 def register_wanvideo_configs():
     """Register WanVideo config getters with the factory."""
+    # Use relative imports to avoid circular dependencies
     from ...factory import ConfigFactory
-
+    
+    # Register model types
     ConfigFactory.register_model_type("wanvideo", get_wan_config)
+    ConfigFactory.register_model_type("t2v", get_wan_config)
+    ConfigFactory.register_model_type("i2v", get_wan_config)
