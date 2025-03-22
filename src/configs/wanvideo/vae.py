@@ -365,7 +365,7 @@ class Encoder3d(nn.Module):
                 x = layer(x)
         return x
 
-
+# src/configs/models/wanvideo/vae.py (continued)
 class Decoder3d(nn.Module):
 
     def __init__(self,
@@ -518,7 +518,7 @@ class WanVAE_(nn.Module):
         ## cache
         t = x.shape[2]
         iter_ = 1 + (t - 1) // 4
-        ## 对encode输入的x，按时间拆分为1、4、4、4....
+        ## Split input x along time dimension into chunks of size 1, 4, 4, 4...
         for i in range(iter_):
             self._enc_conv_idx = [0]
             if i == 0:
