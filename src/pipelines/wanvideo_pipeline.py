@@ -373,7 +373,7 @@ class WanVideoPipeline:
         Load the VAE model.
 
         Returns:
-            VAE model instance
+            A simple VAE wrapper for generating output
         """
         logger.info("Loading VAE")
 
@@ -445,6 +445,8 @@ class WanVideoPipeline:
         
         # Create a simple VAE instance that will at least let us progress
         vae = SimpleVAE(vae_path, self.device, self.dtype)
+        
+        return vae
         
         return vae
     # def _load_vae(self):
@@ -821,8 +823,8 @@ class WanVideoPipeline:
         latent_width = width // vae_scale
         latent_frames = (num_frames - 1) // temporal_vae_scale + 1
 
-        # Create random generator with seed
-        generator = torch.Generator(device="cpu").manual_seed(seed)
+        # Create random generator with seed - must match device type
+        generator = torch.Generator(device=self.device).manual_seed(seed)
 
         # Generate random latents
         latents = torch.randn(
