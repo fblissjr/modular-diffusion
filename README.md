@@ -2,6 +2,13 @@
 
 a modular approach to diffusion transformer model inference, designed for tinkerers who want control, visibility, and flexibility.
 
+## immediate next steps
+
+- end-to-end inference in a workable state with `./tests/quick_test.py`
+- immediately followed by a re-org the code base to be more... modular. i see what i'd do differently now, and now's the time to do it. i've removed `diffusers` completely now and went pure torch because it gives more flexibility downstream.
+- focus on getting wanvideo right, but not so focused that i lose track of the real end goals here.
+- write tests. lots of them.
+
 ## Vision & Purpose
 
 modern AI systems are increasingly becoming compound systems built from multiple specialized models working together. most inference engines take a monolithic approach, where it tries to run everything. LLMs, for example, are optimized depending on your hardware and use case - and with LLMs becoming a common part of diffusion models (whether it's for prompt expansion or something else entirely) and modern LLMs having a vision component, it really starts to make more sense to run those where they work best for your use case.
