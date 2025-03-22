@@ -23,9 +23,9 @@ try:
     
     # Create minimal config - adjust model_path!
     config = WanVideoConfig(
-        model_path="./checkpoints/Wan2.1-T2V-1.3B-Diffusers",
+        model_path="./checkpoints/wan2_1-t2v-1_3b_fp32.safetensors",
         device="cuda" if torch.cuda.is_available() else "cpu",
-        dtype="bf16" if torch.cuda.is_bf16_supported() else "fp16",
+        dtype="fp16",
         # Minimal generation config
         generation=GenerationConfig(
             height=320,  # Lower for testing
