@@ -56,14 +56,25 @@ class WanRMSNorm(nn.Module):
         Returns:
             Normalized tensor
         """
-        # Convert to float32 for better numerical stability
+        orig_dtype = x.dtype
+        
+        # Always normalize in float32 for numerical stability
         x_float = x.float()
-        # Calculate RMS along the last dimension
         rms = torch.sqrt(x_float.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-        # Normalize and scale with learned weight
         normalized = (x_float / rms) * self.weight
-        # Convert back to original dtype
-        return normalized.type_as(x)
+        
+        # Return in original dtype to maintain consistency
+        return normalized.to(orig_dtype)
+    
+    def _prepare_model_input(self, tensor, target_module):
+        """Prepare tensor for input to a specific module."""
+        module_name = target_module.__class__.__name__
+        # For certain modules, ensure float32
+        if any(k in module_name.lower() for k in self.dtype_manager.fp32_keywords):
+            return tensor.to(torch.float32)
+        # For most modules, use configured dtype
+        return tensor.to(self.dtype)
+        
 
 class WanLayerNorm(nn.LayerNorm):
     """

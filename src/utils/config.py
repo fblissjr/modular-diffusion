@@ -7,6 +7,27 @@ import logging
 logger = logging.getLogger(__name__)
 
 @dataclass
+class TextEncoderConfig:
+    model_path: str
+    device: str = "cuda"
+    dtype: str = "bf16"  # Can be "fp32", "fp16", "bf16"
+    offload: bool = False
+
+@dataclass
+class DiffusionConfig:
+    model_path: str
+    device: str = "cuda"
+    dtype: str = "bf16"
+    internal_fp32_ops: List[str] = field(default_factory=lambda: ["norm", "bias"])
+
+@dataclass
+class VAEConfig:
+    model_path: str
+    device: str = "cpu"  # Default to CPU for memory efficiency
+    dtype: str = "fp32"  # VAEs often need higher precision
+    tiling: bool = True
+
+@dataclass
 class MemoryConfig:
     """
     Configuration for memory management strategies.

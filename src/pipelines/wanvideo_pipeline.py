@@ -27,6 +27,7 @@ import json
 import imageio
 from safetensors.torch import load_file
 
+from src.configs import get_model_config
 from src.utils.context import create_context_strategy
 from src.utils.memory import MemoryManager, MemoryTracker
 from src.utils.config import WanVideoConfig
@@ -36,10 +37,11 @@ from src.models.vae import WanVideoVAE
 from src.models.diffusion_model import WanDiT
 from src.schedulers.flow_scheduler import FlowUniPCScheduler
 from src.schedulers.flow_dpm_scheduler import FlowDPMScheduler
-from diffusers import EulerDiscreteScheduler
+from src.schedulers.euler_scheduler import EulerDiscreteScheduler
+from src.utils.dtype_utils import DtypeManager
+
 
 logger = logging.getLogger(__name__)
-
 
 @dataclass
 class WanVideoPipelineOutput:
@@ -74,10 +76,10 @@ class WanVideoPipeline:
 
     def __init__(
         self,
-        model_path: str,
-        config: Optional[WanVideoConfig] = None,
-        device: str = "cuda",
-        dtype: torch.dtype = torch.bfloat16,
+        text_encoder_config: TextEncoderConfig,
+        diffusion_config: DiffusionConfig,
+        vae_config: VAEConfig,
+        scheduler_config: Optional[SchedulerConfig] = None
     ):
         """
         Initialize the WanVideo pipeline.
@@ -88,6 +90,16 @@ class WanVideoPipeline:
             device: Computation device
             dtype: Data type for computation
         """
+
+        # Load components with individual configs
+        self.text_encoder = self._load_text_encoder(text_encoder_config)
+        self.diffusion_model = self._load_diffusion_model(diffusion_config)
+        self.vae = self._load_vae(vae_config)
+        self.scheduler = self._create_scheduler(scheduler_config)
+
+        # Create conversion helpers for component boundaries
+        self.interface_helpers = self._create_interface_helpers()
+
         self.model_path = Path(model_path)
 
         # Set up configuration
@@ -118,7 +130,6 @@ class WanVideoPipeline:
         )
 
         # Set up memory management
-
         self.memory_tracker = MemoryTracker()
         self.memory_manager = MemoryManager(
             self.config.memory,
@@ -129,15 +140,17 @@ class WanVideoPipeline:
         # Determine model type from path or config
         self.model_type = self._determine_model_type()
 
-        # Load components
+        # Add dtype manager
+        self.dtype_manager = DtypeManager(
+            dtype=self.dtype,
+            keep_norm_fp32=self.config.memory.keep_norm_fp32
+        )
+        
+        # Load components with dtype awareness
         with self.memory_tracker.track_usage("Loading pipeline components"):
-            # Load text encoder
+            # Load components passing the dtype manager
             self.text_encoder = self._load_text_encoder()
-
-            # Load diffusion model
             self.diffusion_model = self._load_diffusion_model()
-
-            # Load VAE
             self.vae = self._load_vae()
 
             # Create scheduler
@@ -155,6 +168,18 @@ class WanVideoPipeline:
         )
 
         logger.info(f"WanVideo pipeline initialized: model_type={self.model_type}")
+
+    def _create_interface_helpers(self):
+        """Create helper functions for component interfaces."""
+        text_dtype = self.text_encoder_config.to_torch_dtype()
+        diffusion_dtype = self.diffusion_config.to_torch_dtype()
+        vae_dtype = self.vae_config.to_torch_dtype()
+        
+        return {
+            "text_to_diffusion": lambda x: x.to(diffusion_dtype) if x.dtype != diffusion_dtype else x,
+            "diffusion_to_vae": lambda x: x.to(vae_dtype) if x.dtype != vae_dtype else x,
+            # we can add additional helpers as needed
+        }
 
     def _determine_model_type(self) -> str:
         """
@@ -229,9 +254,6 @@ class WanVideoPipeline:
         """
         logger.info("Loading diffusion model")
 
-        # Import the config factory
-        from src.configs import get_model_config
-
         # Get the appropriate config for this model
         model_config = get_model_config(self.model_path, "wanvideo")
 
@@ -278,7 +300,6 @@ class WanVideoPipeline:
 
         if index_path:
             # Handle sharded models
-            import json
 
             # Read the index file
             with open(index_path, "r") as f:
@@ -356,6 +377,16 @@ class WanVideoPipeline:
                     f"First few unexpected keys: {unexpected_keys[:5]}"
                 )
 
+            # After loading weights, apply dtype policy
+            self.dtype_manager.apply_to_model(model)
+            
+            # For critical modules, register runtime hooks
+            if self.config.memory.get('register_dtype_hooks', True):
+                self.dtype_manager.register_hooks(model)
+            
+            # Apply other optimizations and return
+            return self.memory_manager.optimize_model(model)
+            
         # Apply model weights
         model.load_state_dict(state_dict, strict=False)
 
@@ -565,50 +596,33 @@ class WanVideoPipeline:
 
         # Create scheduler based on type
         if scheduler_type == "unipc":
-            scheduler = FlowUniPCScheduler(
+            return FlowUniPCScheduler(
                 num_train_timesteps=1000,
                 prediction_type="flow_prediction",
                 shift=self.config.generation.shift,
             )
         elif scheduler_type == "dpm++" or scheduler_type == "dpm++_sde":
-            scheduler = FlowDPMScheduler(
+            return FlowDPMScheduler(
                 num_train_timesteps=1000,
                 prediction_type="flow_prediction",
                 shift=self.config.generation.shift,
-                algorithm_type="dpmsolver++"
-                if scheduler_type == "dpm++"
-                else "sde-dpmsolver++",
+                algorithm_type="dpmsolver++" if scheduler_type == "dpm++" else "sde-dpmsolver++",
             )
         elif scheduler_type == "euler":
-            try:
-                scheduler = EulerDiscreteScheduler(
-                    num_train_timesteps=1000,
-                    beta_start=0.00085,
-                    beta_end=0.012,
-                    beta_schedule="scaled_linear",
-                )
-            except ImportError:
-                logger.warning(
-                    "EulerDiscreteScheduler not available, falling back to FlowUniPCScheduler"
-                )
-                scheduler = FlowUniPCScheduler(
-                    num_train_timesteps=1000,
-                    prediction_type="flow_prediction",
-                    shift=self.config.generation.shift,
-                )
+            return EulerDiscreteScheduler(
+                num_train_timesteps=1000,
+                beta_start=0.00085,
+                beta_end=0.012,
+                beta_schedule="scaled_linear",
+            )
         else:
             # Default to UniPC
-            logger.warning(
-                f"Unknown scheduler type: {scheduler_type}, falling back to FlowUniPCScheduler"
-            )
-
-            scheduler = FlowUniPCScheduler(
+            logger.warning(f"Unknown scheduler type: {scheduler_type}, falling back to FlowUniPCScheduler")
+            return FlowUniPCScheduler(
                 num_train_timesteps=1000,
                 prediction_type="flow_prediction",
                 shift=self.config.generation.shift,
             )
-
-        return scheduler
 
     def _setup_teacache(self):
         """
@@ -963,54 +977,59 @@ class WanVideoPipeline:
         Returns:
             Model output tensor
         """
-        # Current percentage through sampling
-        step_percentage = step_idx / total_steps
+        # Use autocast for automatic mixed precision
+        with self.dtype_manager.autocast():
+            # Calculate sequence length
+            seq_len = latents.shape[2] * latents.shape[3] * latents.shape[4]
 
-        # Calculate sequence length (used by transformer model)
-        seq_len = latents.shape[2] * latents.shape[3] * latents.shape[4]
+            # Check TeaCache first if enabled
+            if self.teacache and "cond" in teacache_streams:
+                # Get time modulation tensor
+                time_embed, time_modulation = self.diffusion_model.time_embedding(timestep)
 
-        # Check TeaCache first if enabled
-        if self.teacache and "cond" in teacache_streams:
-            # Get time modulation tensor
-            time_embed, time_modulation = self.diffusion_model.time_embedding(timestep)
-
-            # Check if we can skip conditional computation
-            cond_should_compute = self.teacache.should_compute(
-                teacache_streams["cond"], step_idx, time_modulation
-            )
-
-            # Check if we can skip unconditional computation
-            uncond_should_compute = True
-            if guidance_scale > 1.0 and "uncond" in teacache_streams:
-                uncond_should_compute = self.teacache.should_compute(
-                    teacache_streams["uncond"], step_idx, time_modulation
+                # Check if we can skip conditional computation
+                cond_should_compute = self.teacache.should_compute(
+                    teacache_streams["cond"], step_idx, time_modulation
                 )
 
-            # If we can skip both, apply cached residuals
-            if not cond_should_compute and (
-                guidance_scale <= 1.0 or not uncond_should_compute
-            ):
-                # Apply cached residual for conditional
-                return self.teacache.apply_cached_residual(
-                    teacache_streams["cond"], latents
-                )
+                # Check if we can skip unconditional computation
+                uncond_should_compute = True
+                if guidance_scale > 1.0 and "uncond" in teacache_streams:
+                    uncond_should_compute = self.teacache.should_compute(
+                        teacache_streams["uncond"], step_idx, time_modulation
+                    )
 
-        # Standard processing without TeaCache or when we can't skip
+                # If we can skip both, apply cached residuals
+                if not cond_should_compute and (
+                    guidance_scale <= 1.0 or not uncond_should_compute
+                ):
+                    # Apply cached residual for conditional
+                    return self.teacache.apply_cached_residual(
+                        teacache_streams["cond"], latents
+                    )
+
+            # Standard processing without TeaCache or when we can't skip
+            with torch.no_grad():
+                # Unconditional path (if guidance scale > 1)
+                uncond_output = None
+                if guidance_scale > 1.0:
+                    # Store original latents if using TeaCache
+                    uncond_latents = latents.clone()
+
         with torch.no_grad():
-            # Unconditional path (if guidance scale > 1)
-            uncond_output = None
+            # Unconditional path
             if guidance_scale > 1.0:
-                # Store original latents if using TeaCache
-                uncond_latents = latents.clone()
-
-                # Run unconditional forward pass
+                # Ensure inputs have consistent dtype
+                uncond_latents = latents.clone().to(self.dtype)
+                timestep_typed = timestep.to(self.dtype)
+                
                 uncond_output = self.diffusion_model(
                     [uncond_latents],
-                    timestep,
+                    timestep_typed,
                     [text_embeds["negative_prompt_embeds"][0]],
                     seq_len=seq_len,
                     is_uncond=True,
-                    current_step_percentage=step_percentage,
+                    current_step_percentage=step_idx/total_steps,
                 )[0][0]
 
                 # Store for TeaCache if enabled
@@ -1027,30 +1046,25 @@ class WanVideoPipeline:
                     )
 
             # Conditional path
-            # Store original latents if using TeaCache
-            cond_latents = latents.clone() if self.teacache else latents
-
-            # Run conditional forward pass
+            cond_latents = latents.clone().to(self.dtype) if self.teacache else latents.to(self.dtype)
+            timestep_typed = timestep.to(self.dtype)
+            
             cond_output = self.diffusion_model(
                 [cond_latents],
-                timestep,
+                timestep_typed,
                 [text_embeds["prompt_embeds"][0]],
                 seq_len=seq_len,
                 is_uncond=False,
-                current_step_percentage=step_percentage,
+                current_step_percentage=step_idx/total_steps,
             )[0][0]
-
-            # Store for TeaCache if enabled
-            if self.teacache and "cond" in teacache_streams and cond_should_compute:
-                self.teacache.store_residual(
-                    teacache_streams["cond"], cond_latents, cond_output, time_modulation
-                )
-
-        # Combine outputs for classifier-free guidance
+            
+        # Ensure consistent dtype for outputs before combining
         if guidance_scale > 1.0 and uncond_output is not None:
-            return uncond_output + guidance_scale * (cond_output - uncond_output)
+            result = uncond_output.to(self.dtype) + guidance_scale * (cond_output.to(self.dtype) - uncond_output.to(self.dtype))
         else:
-            return cond_output
+            result = cond_output.to(self.dtype)
+        
+        return result
 
     def _decode_latents(self, latents: torch.Tensor) -> torch.Tensor:
         """

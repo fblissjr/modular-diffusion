@@ -478,11 +478,12 @@ class MemoryConfig:
 
     def __init__(
         self,
-        dtype: torch.dtype = torch.bfloat16,  # Default dtype for computation
         quantize_method: str = "none",  # Quantization method to use
         use_torch_compile: bool = False,  # Whether to use torch.compile
         compile_mode: str = "default",  # Mode for torch.compile
-        keep_norm_fp32: bool = True,  # Keep norm layers in fp32
+        keep_norm_fp32: bool = True,
+        register_dtype_hooks: bool = True,  # New option for dtype hooks
+        dtype: Optional[torch.dtype] = None,  # Will be set from main config
         offload_to_cpu: bool = False,  # Offload unused components to CPU
         block_swap_count: int = 0,  # Number of blocks to swap
         vae_tiling: bool = True,  # Use tiling for VAE operations
