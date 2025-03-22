@@ -42,9 +42,9 @@ class ConfigFactory:
                 return cls._registry[key](model_path, model_type)
         
         logger.warning(f"Unknown model type: {model_type}, using generic config")
-        # Return an object with expected attributes to avoid AttributeError
+        # Return a basic config to avoid AttributeError
         from .models.wanvideo.wan_t2v_1_3B import t2v_1_3B
-        return t2v_1_3B  # Fallback to a known config
+        return t2v_1_3B  # Fallback to the 1.3B config we know we need
     
     @classmethod
     def _infer_model_type(cls, model_path):

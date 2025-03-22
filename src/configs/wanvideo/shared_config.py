@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 class WanSharedConfig:
     """
     Shared configuration parameters for WanVideo models.
-
+    
     This replaces the EasyDict-based config from the original repo
     with a native Python dataclass implementation.
     """
@@ -16,7 +16,7 @@ class WanSharedConfig:
     t5_dtype: torch.dtype = torch.bfloat16
     text_len: int = 512
 
-    # transformer parameters
+    # transformer parameters  
     param_dtype: torch.dtype = torch.bfloat16
 
     # inference parameters

@@ -4,8 +4,13 @@ from .factory import ConfigFactory
 def get_model_config(model_path, model_type=None):
     """
     Get the appropriate model config based on path and type.
-
-    This is the main entry point for obtaining model configurations.
+    
+    Args:
+        model_path: Path to model directory
+        model_type: Optional model type hint
+        
+    Returns:
+        Model configuration object
     """
     return ConfigFactory.get_config(model_path, model_type)
 

@@ -1,30 +1,19 @@
-# src/utils/dtype.py
-"""
-Dtype management for consistent precision handling across model components.
-
-This module provides centralized control over data types throughout the 
-diffusion pipeline, ensuring consistent precision while allowing selective 
-use of higher precision for numerical stability when needed.
-
-Similar to how LLM inference engines handle mixed precision, this allows
-maintaining performance while preserving stability in critical operations.
-"""
-
+# src/core/dtype.py
 import torch
 import torch.nn as nn
-import logging
-from typing import Dict, List, Set, Optional, Union, Any
+from typing import Dict, Set, Optional, List, Union, Any
 from contextlib import contextmanager
+import logging
 
 logger = logging.getLogger(__name__)
 
 class DtypeManager:
     """
-    Centralized manager for dtype consistency across model components.
+    Centralized dtype management across components.
     
-    This is conceptually similar to how LLM engines handle KV cache precision,
-    where certain operations need higher precision while others can use lower
-    precision for performance.
+    This handles consistent type conversion and maintains policy on
+    which operations need higher precision, similar to how LLMs handle
+    mixed precision training and inference.
     """
     
     def __init__(
@@ -45,6 +34,8 @@ class DtypeManager:
         self.param_dtype = param_dtype or compute_dtype
         
         # Default modules to keep in FP32 for numerical stability
+        # Similar to LLM mixed precision approach where certain layers
+        # like normalization need higher precision
         self.fp32_modules = keep_modules_fp32 or {
             "norm", "ln", "layernorm", "rmsnorm", "embedding", "bias"
         }
@@ -64,7 +55,15 @@ class DtypeManager:
         return torch.float32 if self.needs_fp32(name) else self.param_dtype
     
     def apply_to_model(self, model: nn.Module) -> nn.Module:
-        """Apply dtype policy to model parameters."""
+        """
+        Apply dtype policy to model parameters.
+        
+        Args:
+            model: PyTorch model to convert
+            
+        Returns:
+            Model with converted dtypes
+        """
         converted = 0
         kept_fp32 = 0
         
@@ -87,7 +86,15 @@ class DtypeManager:
         return model
     
     def register_hooks(self, model: nn.Module) -> nn.Module:
-        """Register hooks for runtime dtype management."""
+        """
+        Register hooks for runtime dtype management.
+        
+        Args:
+            model: PyTorch model
+            
+        Returns:
+            Model with dtype hooks
+        """
         hooks_added = 0
         
         for name, module in model.named_modules():
@@ -118,47 +125,18 @@ class DtypeManager:
             module.register_forward_hook(make_post_hook(name))
             hooks_added += 1
         
-        logger.info(f"Registered dtype hooks to {hooks_added} modules")
+        logger.info(f"Registered dtype hooks for {hooks_added} modules")
         return model
     
     @contextmanager
     def autocast(self):
-        """Context manager for mixed precision computation."""
+        """
+        Context manager for mixed precision computation.
+        
+        Similar to how LLMs use autocast for mixed precision inference.
+        """
         if self.compute_dtype != torch.float32 and torch.cuda.is_available():
             with torch.autocast(device_type="cuda", dtype=self.compute_dtype):
                 yield
         else:
             yield
-
-    def convert_tensor_dtype(tensor, target_dtype, force_contiguous=True):
-        """
-        Convert tensor to target dtype with proper handling.
-        
-        This handles edge cases like complex dtypes, quantized types,
-        and ensures memory layout is optimized.
-        
-        Args:
-            tensor: Input tensor
-            target_dtype: Target data type  
-            force_contiguous: Whether to force contiguous memory layout
-            
-        Returns:
-            Converted tensor
-        """
-        # Skip if already correct dtype
-        if tensor.dtype == target_dtype:
-            return tensor.contiguous() if force_contiguous else tensor
-        
-        # Special handling for complex types
-        if tensor.is_complex() and not target_dtype.is_complex:
-            # Handle complex to real conversion
-            tensor = tensor.real
-        
-        # Convert to target dtype
-        result = tensor.to(target_dtype)
-        
-        # Ensure contiguous memory layout for optimal performance
-        if force_contiguous and not result.is_contiguous():
-            result = result.contiguous()
-        
-        return result

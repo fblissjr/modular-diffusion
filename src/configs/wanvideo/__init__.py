@@ -1,17 +1,16 @@
 # src/configs/models/wanvideo/__init__.py
-
 import os
 import copy
 from pathlib import Path
 
-# Set environment variables
+# Set environment variables 
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
 # Import configs
 from .shared_config import wan_shared_cfg
-from .wan_i2v_14B import i2v_14B
 from .wan_t2v_1_3B import t2v_1_3B
 from .wan_t2v_14B import t2v_14B
+from .wan_i2v_14B import i2v_14B
 
 # Create t2i_14B config (same as t2v_14B)
 t2i_14B = copy.deepcopy(t2v_14B)
@@ -45,11 +44,11 @@ SUPPORTED_SIZES = {
 def get_wan_config(model_path, model_type=None):
     """
     Get the appropriate WanVideo model config based on path and type.
-
+    
     Args:
         model_path: Path to model directory
         model_type: Model type (t2v, i2v, t2i) or None to detect
-
+        
     Returns:
         Model configuration
     """
