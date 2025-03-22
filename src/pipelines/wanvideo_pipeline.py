@@ -377,27 +377,12 @@ class WanVideoPipeline:
         """
         logger.info("Loading VAE")
 
-        # Import the config factory
-        try:
-            from src.configs import get_model_config
-            
-            # Get the appropriate config for this model
-            model_config = get_model_config(self.model_path, "wanvideo")
-            logger.info(f"Using VAE config from: {getattr(model_config, 'name', 'Unknown')}")
-        except Exception as e:
-            logger.warning(f"Error loading config: {e}, using defaults")
-            model_config = None
-
         # Find VAE weights
         vae_paths = [
             self.model_path / "vae" / "diffusion_pytorch_model.safetensors",
             self.model_path / "vae.safetensors",
             self.model_path / "vae" / "model.safetensors",
         ]
-        
-        # Add config path if available
-        if model_config and hasattr(model_config, 'vae_checkpoint'):
-            vae_paths.append(self.model_path / model_config.vae_checkpoint)
 
         vae_path = None
         for path in vae_paths:
@@ -409,39 +394,46 @@ class WanVideoPipeline:
         if vae_path is None:
             raise FileNotFoundError(f"Could not find VAE weights in {self.model_path}")
 
-        # Load weights
-        logger.info(f"Loading VAE weights from {vae_path}")
+        # Import the original WanVAE implementation directly
         try:
+            from src.configs.models.wanvideo import WanVAE
+            
+            # Create a direct instance of the original WanVAE
+            logger.info(f"Loading VAE weights from {vae_path}")
+            vae = WanVAE(
+                z_dim=16,  # Standard latent dimension
+                vae_pth=str(vae_path),
+                dtype=self.dtype,
+                device=self.device
+            )
+            
+            return vae
+        except ImportError as e:
+            # Fall back to our adapter if import fails
+            logger.warning(f"Failed to import original WanVAE: {e}")
+            from src.configs.models.wanvideo import WanVideoVAE
+            
+            # Load weights
+            logger.info(f"Loading VAE weights from {vae_path}")
             if str(vae_path).endswith(".safetensors"):
                 vae_state_dict = load_file(str(vae_path))
             else:
                 vae_state_dict = torch.load(str(vae_path), map_location="cpu")
-        except Exception as e:
-            raise RuntimeError(f"Failed to load VAE weights: {e}")
-
-        # Get VAE stride from config if available
-        vae_stride = (4, 8, 8)  # Default VAE stride
-        if model_config and hasattr(model_config, 'vae_stride'):
-            vae_stride = model_config.vae_stride
-
-        # Create model
-        vae = WanVideoVAE(
-            dim=96,  # Default for WanVideo VAE
-            z_dim=16,  # Latent dimension
-            dtype=self.dtype,
-            vae_stride=vae_stride
-        )
-
-        # Load weights
-        vae.load_state_dict(vae_state_dict)
-
-        # VAE initially on CPU to save memory if configured
-        if self.config.memory.text_encoder_offload:
-            vae.to("cpu")
-        else:
+            
+            # Create model
+            vae = WanVideoVAE(
+                dim=96,     # Standard for WanVideo
+                z_dim=16,   # Latent dimension
+                dtype=self.dtype
+            )
+            
+            # Load weights
+            vae.load_state_dict(vae_state_dict)
+            
+            # Device placement
             vae.to(self.device)
-
-        return vae
+            
+            return vae
 
     def _create_scheduler(self):
         """
