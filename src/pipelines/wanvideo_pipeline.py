@@ -396,7 +396,7 @@ class WanVideoPipeline:
 
         # Import the original WanVAE implementation directly
         try:
-            from src.configs.models.wanvideo import WanVAE
+            from src.configs.models.wanvideo.vae import WanVAE
             
             # Create a direct instance of the original WanVAE
             logger.info(f"Loading VAE weights from {vae_path}")
@@ -411,7 +411,7 @@ class WanVideoPipeline:
         except ImportError as e:
             # Fall back to our adapter if import fails
             logger.warning(f"Failed to import original WanVAE: {e}")
-            from src.configs.models.wanvideo import WanVideoVAE
+            from src.models.vae import WanVideoVAE
             
             # Load weights
             logger.info(f"Loading VAE weights from {vae_path}")
