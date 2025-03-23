@@ -16,6 +16,7 @@ from src.models.diffusion import DiffusionModel
 from src.models.vae import VAE
 from src.schedulers.base import Scheduler
 from src.pipelines.base import Pipeline
+from PIL import Image
 
 logger = logging.getLogger(__name__)
 
@@ -245,7 +246,7 @@ class WanVideoPipeline(Pipeline):
         
         return scheduler
     
-    def __call__(self, **kwargs) -> Dict[str, Any]:
+    def __call__(self,**kw):
         """
         Generate video from prompt.
         
@@ -264,138 +265,108 @@ class WanVideoPipeline(Pipeline):
             Dictionary with generated video
         """
         # Start timer
-        start_time = time.time()
+        t0=time.time()
         
         # Get generation parameters (update defaults with kwargs)
-        prompt = kwargs.pop("prompt")
+        prompt = kw.pop("prompt")
         if not prompt:
             raise ValueError("prompt is required")
             
         # Get parameters with defaults from config
-        negative_prompt = kwargs.pop("negative_prompt", self.generation_config["negative_prompt"])
-        height = kwargs.pop("height", self.generation_config["height"])
-        width = kwargs.pop("width", self.generation_config["width"])
-        num_frames = kwargs.pop("num_frames", self.generation_config["num_frames"])
-        num_inference_steps = kwargs.pop("num_inference_steps", self.generation_config["num_inference_steps"])
-        guidance_scale = kwargs.pop("guidance_scale", self.generation_config["guidance_scale"])
-        generator = kwargs.pop("generator", None)
-        output_type = kwargs.pop("output_type", "pil")
+        n_p=kw.pop("negative_prompt",self.generation_config["negative_prompt"])
+        h=kw.pop("height",self.generation_config["height"])-(kw.pop("height",self.generation_config["height"])%8)
+        w=kw.pop("width",self.generation_config["width"])-(kw.pop("width",self.generation_config["width"])%8)
+        nf=kw.pop("num_frames",self.generation_config["num_frames"])
+        ns=kw.pop("num_inference_steps",self.generation_config["num_inference_steps"])
+        gs=kw.pop("guidance_scale",self.generation_config["guidance_scale"])
+        g=kw.pop("generator",None); ot=kw.pop("output_type","pil")
         
         # Ensure dimensions are divisible by 8
         height = height - height % 8
         width = width - width % 8
         
-        # Encode prompt
-        logger.info(f"Encoding prompt: '{prompt}'")
-        text_embeds = self.text_encoder.encode(
-            prompt=[prompt],
-            negative_prompt=[negative_prompt] if negative_prompt else None
-        )
+        # Encode text
+        logger.info(f"Encoding: '{p}'")
+        emb=self.text_encoder.encode(prompt=[p],negative_prompt=[n_p] if n_p else None)
+    
+        # Setup amd scale latents
+        lh,lw=h//8,w//8
+        logger.info(f"Gen latents: f={nf}, h={lh}, w={lw}")
+        z=torch.randn((self.diffusion_model.in_channels,nf,lh,lw),generator=g,device=self.device,dtype=self.dtype)
+        zs=[z*self.scheduler.init_noise_sigma]
+        
+        # Setup steps
+        self.scheduler.set_timesteps(ns,device=self.device)
+        ts=self.scheduler.timesteps
         
         # Get latent size (dividing dimensions by VAE stride)
         latent_height = height // 8
         latent_width = width // 8
         
         # Generate initial noise
-        logger.info(f"Generating latents: frames={num_frames}, height={latent_height}, width={latent_width}")
-        latents = torch.randn(
-            (1, self.diffusion_model.in_channels, num_frames, latent_height, latent_width),
-            generator=generator,
-            device=self.device,
-            dtype=self.dtype
-        )
-        
-        # Scale latents
-        latents = latents * self.scheduler.init_noise_sigma
-        
-        # Set up scheduler timesteps
-        self.scheduler.set_timesteps(num_inference_steps, device=self.device)
-        timesteps = self.scheduler.timesteps
-        
-        # Run diffusion process
-        logger.info(f"Running diffusion process with {num_inference_steps} steps")
-        for i, t in enumerate(tqdm(timesteps, desc="Generating video")):
-            # For classifier-free guidance, we need to do two forward passes:
-            # one for the conditional (text-conditioned) output
-            # and one for the unconditional (negative prompt) output
-            
-            # Make duplicates for classifier guidance
-            latent_model_input = latents
-            
-            # Get diffusion model prediction
+        logger.info(f"Generating latents: frames={nf}, height={latent_height}, width={latent_width}")
+
+        # Diffusion process
+        logger.info(f"Running {ns} steps")
+        for t in tqdm(ts,desc="Generating"):
             with torch.no_grad():
-                if guidance_scale > 1.0:
-                    # Do classifier-free guidance
-                    # First unconditional (negative prompt)
-                    uncond_output, _ = self.diffusion_model(
-                        [latent_model_input], 
-                        t,
-                        [text_embeds["negative_prompt_embeds"][0]]
-                    )
-                    uncond_output = uncond_output[0]
-                    
-                    # Then conditional (with prompt)
-                    cond_output, _ = self.diffusion_model(
-                        [latent_model_input],
-                        t,
-                        [text_embeds["prompt_embeds"][0]]
-                    )
-                    cond_output = cond_output[0]
-                    
-                    # Combine outputs with guidance
-                    noise_pred = uncond_output + guidance_scale * (cond_output - uncond_output)
+                if gs>1.0:
+                    # CFG: negative prompt
+                    u_out,_=self.diffusion_model(zs,t,[emb["negative_prompt_embeds"][0]])
+                    # Positive prompt
+                    c_out,_=self.diffusion_model(zs,t,[emb["prompt_embeds"][0]])
+                    # Combine
+                    noise=u_out[0]+gs*(c_out[0]-u_out[0])
                 else:
-                    # No guidance - just use conditional output
-                    cond_output, _ = self.diffusion_model(
-                        [latent_model_input],
-                        t,
-                        [text_embeds["prompt_embeds"][0]]
-                    )
-                    noise_pred = cond_output[0]
+                    c_out,_=self.diffusion_model(zs,t,[emb["prompt_embeds"][0]])
+                    noise=c_out[0]
             
-            # Update latents with scheduler
-            latents = self.scheduler.step(noise_pred, t, latents)["prev_sample"]
-        
-        # Decode latents to video frames
-        logger.info("Decoding latents to video frames")
+            # Update latents
+            z=self.scheduler.step(noise,t,zs[0])["prev_sample"]
+            zs=[z]
+
+        # Decode
+        logger.info("Decoding")
         with torch.no_grad():
-            video = self.vae.decode([latents])[0]
+            v=self.vae.decode(zs)[0]
+        v=(v/2+0.5).clamp(0,1)
+
+        # Format output
+        if ot=="latent":o=zs
+        elif ot=="pt":o=v
+        # Convert to numpy array
+        elif ot=="np":o=v.cpu().permute(1,2,3,0).numpy()
+        # Convert to PIL
+        elif ot=="pil":
+            vn=(v*255).round().clamp(0,255).cpu().permute(1,2,3,0).numpy().astype(np.uint8)
+            o=[Image.fromarray(f) for f in vn]
+        else:raise ValueError(f"Unsupported output type: {ot}")
+        
+        dt=time.time()-t0; fps=nf/dt
+        logger.info(f"Done in {dt:.2f}s ({fps:.2f} fps)")
+        return {"video":o,"latents":zs,"generation_time":dt,"fps":fps}
         
         # Clamp and normalize
-        video = (video / 2 + 0.5).clamp(0, 1)
+        #video = (video / 2 + 0.5).clamp(0, 1)
 
-        # Process output based on requested type
-        if output_type == "latent":
-            output = latents
-        elif output_type == "pt":
-            output = video
-        elif output_type == "np":
-            # Convert to numpy array
-            video_np = video.cpu().permute(1, 2, 3, 0).numpy()  # [T, H, W, C]
-            output = video_np
-        elif output_type == "pil":
-            # Convert to PIL images
-            video_np = (video * 255).round().clamp(0, 255).cpu().permute(1, 2, 3, 0).numpy().astype(np.uint8)
-            # Convert to PIL
-            from PIL import Image
-            frames = [Image.fromarray(frame) for frame in video_np]
-            output = frames
-        else:
-            raise ValueError(f"Unsupported output type: {output_type}")
-        
-        # Calculate generation time
-        generation_time = time.time() - start_time
-        fps = num_frames / generation_time
-        
-        logger.info(f"Generation finished in {generation_time:.2f}s ({fps:.2f} frames/sec)")
-        
-        # Return output dictionary
-        return {
-            "video": output,
-            "latents": latents,
-            "generation_time": generation_time,
-            "fps": fps
-        }
+        # # Process output based on requested type
+        # if output_type == "latent":
+        #     output = latents
+        # elif output_type == "pt":
+        #     output = video
+        # elif output_type == "np":
+        #     # Convert to numpy array
+        #     video_np = video.cpu().permute(1, 2, 3, 0).numpy()  # [T, H, W, C]
+        #     output = video_np
+        # elif output_type == "pil":
+        #     # Convert to PIL images
+        #     video_np = (video * 255).round().clamp(0, 255).cpu().permute(1, 2, 3, 0).numpy().astype(np.uint8)
+        #     # Convert to PIL
+        #     from PIL import Image
+        #     frames = [Image.fromarray(frame) for frame in video_np]
+        #     output = frames
+        # else:
+        #     raise ValueError(f"Unsupported output type: {output_type}")
     
     def save_output(self, output: Any, path: str, **kwargs):
         """
