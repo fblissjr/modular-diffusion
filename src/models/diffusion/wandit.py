@@ -2,6 +2,7 @@
 import torch
 import logging
 from typing import List, Dict, Any, Union, Optional, Tuple
+import torch.nn as nn
 
 from src.core.registry import register_component
 from src.models.diffusion.base import DiffusionModel

@@ -7,7 +7,6 @@ from pathlib import Path
 
 from src.core.component import Component
 from src.models.vae.base import VAE
-from src.configs.models.wanvideo.vae import WanVAE as OriginalWanVAE
 from src.core.registry import register_component
 
 logger = logging.getLogger(__name__)
@@ -18,32 +17,27 @@ class WanVAEAdapter(VAE):
     Adapter for WanVideo VAE.
     
     This adapts the original WanVAE implementation to our modular
-    interface, allowing it to be used within our pipeline while
-    maintaining compatibility with the original code.
+    interface, allowing it to be used consistently within our pipeline.
     """
     
     def __init__(self, config: Dict[str, Any]):
         """
-        Initialize WanVAE adapter with proper error handling.
+        Initialize WanVAE adapter.
         
         Args:
             config: VAE configuration
         """
         super().__init__(config)
         
-        # Get paths and parameters
+        # Get configuration parameters
         model_path = config.get("model_path")
         if not model_path:
             raise ValueError("model_path is required for WanVAE")
             
-        checkpoint_path = Path(model_path)
-        if not checkpoint_path.exists():
-            raise FileNotFoundError(f"VAE checkpoint not found: {checkpoint_path}")
-        
         # VAE parameters
         z_dim = config.get("z_dim", 16)
         
-        # Create original VAE with the correct path
+        # Create original VAE with our parameters
         self.vae = OriginalWanVAE(
             z_dim=z_dim,
             vae_pth=model_path,
@@ -51,7 +45,7 @@ class WanVAEAdapter(VAE):
             device=self.device
         )
         
-        logger.info(f"Initialized WanVAE with z_dim={z_dim}, checkpoint={checkpoint_path}")
+        logger.info(f"Initialized WanVAE with z_dim={z_dim}, checkpoint={model_path}")
         
     def encode(self, videos: List[torch.Tensor]) -> List[torch.Tensor]:
         """
@@ -85,6 +79,7 @@ class WanVAEAdapter(VAE):
         # Use original VAE decode
         return self.vae.decode(latents)
         
+        
     def tiled_decode(self, latents: torch.Tensor, 
                    tile_size: Tuple[int, int] = (256, 256),
                    tile_stride: Tuple[int, int] = (128, 128)) -> torch.Tensor:
@@ -99,10 +94,15 @@ class WanVAEAdapter(VAE):
         Returns:
             Decoded video
         """
-        # For the MVP, we'll use the basic decode method
-        # We'll implement tiled decoding in a future enhancement
+        # This is where we could implement improved tiling for memory efficiency
+        # Example implementation for future enhancement:
+        
+        # Prepare output tensor
         if isinstance(latents, torch.Tensor):
             latents = [latents]
+            
+        # For now, just use regular decode
+        # In future, implement chunked decoding with overlapping tiles
         return self.decode(latents)[0]
         
     def to(self, device: Optional[torch.device] = None, 

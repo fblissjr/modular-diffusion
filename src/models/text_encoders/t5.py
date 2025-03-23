@@ -1,35 +1,34 @@
-# In src/models/text_encoders/t5.py
+# src/models/text_encoders/t5.py
 import torch
 import torch.nn as nn
 import logging
-from typing import List, Dict, Any, Union, Optional
+from typing import List, Dict, Any, Union, Optional, Tuple
 from pathlib import Path
 from transformers import T5EncoderModel, AutoTokenizer, AutoConfig
-import safetensors.torch
 
 from src.core.component import Component
-from src.core.registry import register_component
 from src.models.text_encoders.base import TextEncoder
+from src.core.registry import register_component
 
 logger = logging.getLogger(__name__)
 
 @register_component("T5TextEncoder", TextEncoder)
 class T5TextEncoder(TextEncoder):
     """
-    T5-based text encoder for WanVideo.
+    T5-based text encoder adapter.
+    
+    This wraps Hugging Face's T5 implementation to provide a consistent
+    interface for text encoding across different models.
     """
     
     def __init__(self, config: Dict[str, Any]):
-        """Initialize T5 text encoder."""
+        """
+        Initialize T5 text encoder.
+        
+        Args:
+            config: Encoder configuration
+        """
         super().__init__(config)
-
-        if 'test_mode' in config and config['test_mode']:
-            # Create dummy tokenizer and model for testing
-            logger.warning("Running T5TextEncoder in test mode with dummy model")
-            self.tokenizer = None
-            self.t5_model = nn.Module()  # Empty module
-            self.max_length = max_length
-            return
         
         # Get paths and parameters
         model_path = config.get("model_path")
@@ -43,20 +42,19 @@ class T5TextEncoder(TextEncoder):
         logger.info(f"Loading tokenizer from {tokenizer_name}")
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         
-        # Load model - special handling for safetensors
+        # Load model with safetensors support
         logger.info(f"Loading T5 encoder from {model_path}")
         model_path = Path(model_path)
         
         if model_path.is_file() and str(model_path).endswith('.safetensors'):
             # Create a model config for UMT5-XXL
-            logger.info("Creating model from safetensors file")
             model_config = AutoConfig.from_pretrained(tokenizer_name)
             
             # Create empty model with the right config
             self.t5_model = T5EncoderModel(config=model_config)
             
             # Load weights from safetensors
-            logger.info(f"Loading weights from {model_path}")
+            import safetensors.torch
             state_dict = safetensors.torch.load_file(model_path)
             
             # Load state dict
@@ -104,13 +102,10 @@ class T5TextEncoder(TextEncoder):
             if len(negative_prompt) == 1 and len(prompt) > 1:
                 negative_prompt = negative_prompt * len(prompt)
                 
-            # Encode negative prompts
-            neg_embeddings = self._encode_text(negative_prompt)
-            
             # Return both prompt and negative prompt embeddings
             return {
                 "prompt_embeds": self._encode_text(prompt),
-                "negative_prompt_embeds": neg_embeddings
+                "negative_prompt_embeds": self._encode_text(negative_prompt)
             }
         else:
             # Return only prompt embeddings
