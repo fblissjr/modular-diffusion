@@ -4,6 +4,7 @@ import torch
 from typing import Dict, Any, Optional, Union
 from pathlib import Path
 import safetensors.torch
+import torch.nn as nn
 
 logger = logging.getLogger(__name__)
 

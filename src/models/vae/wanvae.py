@@ -8,6 +8,7 @@ from pathlib import Path
 from src.core.component import Component
 from src.models.vae.base import VAE
 from src.core.registry import register_component
+from src.models.wan.vae import WanVAE as OriginalWanVAE
 
 logger = logging.getLogger(__name__)
 

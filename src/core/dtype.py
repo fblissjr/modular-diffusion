@@ -4,6 +4,7 @@ import torch.nn as nn
 from typing import Dict, Set, Optional, List, Union, Any
 from contextlib import contextmanager
 import logging
+import functools
 
 logger = logging.getLogger(__name__)
 
@@ -140,3 +141,15 @@ class DtypeManager:
                 yield
         else:
             yield
+
+    @classmethod
+    def no_autocast(cls, func):
+        """
+        Class method decorator to disable autocast for precision-critical functions.
+        """
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            device_type = "cuda" if torch.cuda.is_available() else "cpu"
+            with torch.amp.autocast(device_type=device_type, enabled=False):
+                return func(*args, **kwargs)
+        return wrapper

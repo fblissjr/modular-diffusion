@@ -7,6 +7,7 @@ import torch.nn as nn
 from src.core.registry import register_component
 from src.models.diffusion.base import DiffusionModel
 from src.models.wan.model import WanModel
+from src.core.dtype import DtypeManager
 
 logger = logging.getLogger(__name__)
 
@@ -252,12 +253,14 @@ class WanAttentionBlock(nn.Module):
             grid_sizes,
             freqs
         )
-        with torch.cuda.amp.autocast(dtype=torch.float32):
+        #with torch.cuda.amp.autocast(dtype=torch.float32):
+        with DtypeManager.autocast():
             x = x + y * e[2]
         
         # Cross-attention
         y = self.cross_attn(self.norm2(x), context, context_lens)
-        with torch.cuda.amp.autocast(dtype=torch.float32):
+        #with torch.cuda.amp.autocast(dtype=torch.float32):
+        with DtypeManager.autocast():
             x = x + y
         
         # Feed-forward

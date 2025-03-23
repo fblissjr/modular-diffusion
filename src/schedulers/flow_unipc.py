@@ -8,7 +8,7 @@ from src.core.registry import register_component
 
 # Import original implementation (assuming it's available in our path)
 # We could alternatively copy specific functions/classes we need
-from wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler as OriginalFlowUniPC
+from src.models.wan import FlowUniPCMultistepScheduler as OriginalFlowUniPC
 
 logger = logging.getLogger(__name__)
 

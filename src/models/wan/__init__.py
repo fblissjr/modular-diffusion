@@ -6,3 +6,4 @@ giving us full control to modify and improve the components.
 """
 
 from .model import WanModel
+from .fm_solvers_unipc import FlowUniPCMultistepScheduler
