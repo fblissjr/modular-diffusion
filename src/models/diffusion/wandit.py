@@ -1,27 +1,21 @@
 # src/models/diffusion/wandit.py
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import math
 import logging
 from typing import List, Dict, Any, Union, Optional, Tuple
-from pathlib import Path
-import safetensors.torch
-from dataclasses import dataclass
 
-from src.core.component import Component
-from src.models.diffusion.base import DiffusionModel
 from src.core.registry import register_component
+from src.models.diffusion.base import DiffusionModel
+from src.models.wan.model import WanModel
 
 logger = logging.getLogger(__name__)
 
 @register_component("WanDiT", DiffusionModel)
 class WanDiT(DiffusionModel):
     """
-    WanDiT Diffusion Transformer model.
+    WanDiT diffusion transformer model.
     
-    This implements the Diffusion Transformer architecture for
-    WanVideo's text-to-video generation.
+    This implements the WanVideo DiT architecture for
+    text-to-video and image-to-video generation.
     """
     
     def __init__(self, config: Dict[str, Any]):
@@ -33,178 +27,115 @@ class WanDiT(DiffusionModel):
         """
         super().__init__(config)
         
-        # Get model path and load config
+        # Get model path and validate
         model_path = config.get("model_path")
         if not model_path:
             raise ValueError("model_path is required for WanDiT")
-            
-        # Load model config
+        
+        # Load model configuration
         model_config = config.get("model_config")
         if not model_config:
             from src.configs import get_model_config
             model_config = get_model_config(model_path, "wanvideo")
-            
-        # Set up parameters from config
-        self.dim = model_config.dim
-        self.num_heads = model_config.num_heads
-        self.hidden_dim = model_config.ffn_dim
-        self.patch_size = model_config.patch_size
-        self.window_size = model_config.window_size
-        self.num_layers = model_config.num_layers
-        self.qk_norm = model_config.qk_norm
-        self.cross_attn_norm = model_config.cross_attn_norm
         
-        # Set in/out channels
+        # Set model parameters from config
         self.in_channels = config.get("in_channels", 16)
         self.out_channels = config.get("out_channels", 16)
+        self.model_type = config.get("model_type", "t2v")
         
-        # Frequency dimensions for time embedding
-        self.freq_dim = model_config.freq_dim
-        
-        # Create model components
-        self._build_model()
+        # Create WanModel with parameters from model_config
+        self.model = WanModel(
+            model_type=self.model_type,
+            patch_size=model_config.patch_size,
+            in_dim=self.in_channels,
+            out_dim=self.out_channels,
+            dim=model_config.dim,
+            ffn_dim=model_config.ffn_dim,
+            freq_dim=getattr(model_config, "freq_dim", 256),
+            text_dim=getattr(model_config, "text_dim", 4096),
+            num_heads=model_config.num_heads,
+            num_layers=model_config.num_layers,
+            window_size=model_config.window_size,
+            qk_norm=model_config.qk_norm,
+            cross_attn_norm=model_config.cross_attn_norm,
+        )
         
         # Load weights
         self._load_weights(model_path)
         
         # Set to eval mode
-        self.eval()
+        self.model.eval()
         
-        logger.info(f"Initialized WanDiT with dim={self.dim}, num_layers={self.num_layers}")
+        logger.info(f"Initialized WanDiT with in_channels={self.in_channels}, out_channels={self.out_channels}")
     
-    def _build_model(self):
-        """Build model components matching the checkpoint structure."""
-        # Following the exact structure from wan/modules/model.py
+    def _load_weights(self, model_path):
+        """
+        Load model weights.
         
-        # Patch embedding
-        self.patch_embedding = nn.Conv3d(
-            self.in_channels, 
-            self.dim,
-            kernel_size=self.patch_size, 
-            stride=self.patch_size
-        )
+        Args:
+            model_path: Path to model weights
+        """
+        import os
+        from pathlib import Path
         
-        # Time embedding
-        self.time_embedding = nn.Sequential(
-            nn.Linear(self.freq_dim, self.dim),
-            nn.SiLU(),
-            nn.Linear(self.dim, self.dim)
-        )
-        self.time_projection = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(self.dim, self.dim * 6)
-        )
-        
-        # Transformer blocks
-        self.blocks = nn.ModuleList([
-            WanAttentionBlock(
-                dim=self.dim,
-                ffn_dim=self.hidden_dim,
-                num_heads=self.num_heads,
-                window_size=self.window_size,
-                qk_norm=self.qk_norm,
-                cross_attn_norm=self.cross_attn_norm
-            )
-            for _ in range(self.num_layers)
-        ])
-        
-        # Output head
-        self.head = Head(self.dim, self.out_channels, self.patch_size)
-        
-        # Register buffer for position encoding
-        d = self.dim // self.num_heads
-        self.register_buffer(
-            "freqs",
-            torch.cat([
-                self._rope_params(1024, d - 4 * (d // 6)),
-                self._rope_params(1024, 2 * (d // 6)),
-                self._rope_params(1024, 2 * (d // 6))
-            ], dim=1)
-        )
-    
-    def _rope_params(self, max_seq_len, dim, theta=10000):
-        """Generate rotary position embedding parameters."""
-        assert dim % 2 == 0
-        freqs = torch.outer(
-            torch.arange(max_seq_len),
-            1.0 / torch.pow(theta, torch.arange(0, dim, 2).to(torch.float64).div(dim))
-        )
-        return torch.polar(torch.ones_like(freqs), freqs)
-    
-    def _load_weights(self, model_path: Union[str, Path]):
-        """Load model weights with exact key matching."""
         model_path = Path(model_path)
         
-        # Find safetensors file
+        # Find checkpoint file
         if model_path.is_dir():
-            # Look for safetensors files
+            # Look for safetensors files first
             safetensor_files = list(model_path.glob("*.safetensors"))
-            if not safetensor_files:
-                raise FileNotFoundError(f"No safetensors files found in {model_path}")
-                
-            # Prefer dtype-specific files in this order: bf16, fp16, fp32
-            for dtype_suffix in ["bf16", "fp16", "fp32"]:
-                for file in safetensor_files:
-                    if dtype_suffix in file.name:
-                        model_path = file
+            if safetensor_files:
+                # Prefer models with specific datatypes
+                for suffix in ["bf16", "fp16", "fp32"]:
+                    for file in safetensor_files:
+                        if suffix in file.name.lower():
+                            checkpoint_path = file
+                            break
+                    if 'checkpoint_path' in locals():
                         break
-                if isinstance(model_path, Path) and not model_path.is_dir():
-                    break
-                    
-            # If we didn't find a specific file, use the first one
-            if model_path.is_dir():
-                model_path = safetensor_files[0]
+                
+                # If no specific dtype found, use the first one
+                if 'checkpoint_path' not in locals():
+                    checkpoint_path = safetensor_files[0]
+            else:
+                # Fall back to .pth files
+                pth_files = list(model_path.glob("*.pth"))
+                if not pth_files:
+                    raise FileNotFoundError(f"No model checkpoint files found in {model_path}")
+                checkpoint_path = pth_files[0]
+        else:
+            checkpoint_path = model_path
         
         # Load weights
-        logger.info(f"Loading model weights from {model_path}")
+        logger.info(f"Loading model weights from {checkpoint_path}")
         try:
-            state_dict = safetensors.torch.load_file(model_path)
-        except Exception as e:
-            logger.error(f"Error loading safetensors file: {e}")
-            return
-        
-        # Show sample keys
-        sample_keys = list(state_dict.keys())[:5]
-        logger.info(f"Sample keys from checkpoint: {sample_keys}")
-        
-        # Map checkpoint keys to our model structure exactly
-        mapped_dict = {}
-        our_state_dict = self.state_dict()
-        
-        for ckpt_key, tensor in state_dict.items():
-            if ckpt_key.startswith('model.'):
-                # Remove model. prefix
-                our_key = ckpt_key[6:]
+            if str(checkpoint_path).endswith('.safetensors'):
+                import safetensors.torch
+                state_dict = safetensors.torch.load_file(checkpoint_path, device='cpu')
+            else:
+                state_dict = torch.load(checkpoint_path, map_location='cpu')
                 
-                # Check if key exists in our model
-                if our_key in our_state_dict:
-                    mapped_dict[our_key] = tensor
-                    continue
-                    
-                # Try to map to our structure
-                if ckpt_key.startswith('model.diffusion_model.'):
-                    # Remove diffusion_model. prefix
-                    clean_key = ckpt_key[len('model.diffusion_model.'):]
-                    
-                    # Try direct mapping
-                    if clean_key in our_state_dict:
-                        mapped_dict[clean_key] = tensor
-        
-        # Check if we have all keys needed
-        missing_keys = set(our_state_dict.keys()) - set(mapped_dict.keys())
-        
-        # Try to load state dict
-        try:
-            missing, unexpected = self.load_state_dict(missing_keys, strict=False)
+            # Handle 'model.' prefix if present
+            adjusted_state_dict = {}
+            for k, v in state_dict.items():
+                if k.startswith('model.'):
+                    adjusted_state_dict[k[6:]] = v
+                else:
+                    adjusted_state_dict[k] = v
+            
+            # Load weights with non-strict matching to allow for differences
+            missing, unexpected = self.model.load_state_dict(adjusted_state_dict, strict=False)
             
             if missing:
-                logger.warning(f"Missing keys: {len(missing)} keys")
+                logger.warning(f"Missing keys when loading weights: {len(missing)} keys")
+                if len(missing) < 10:
+                    logger.warning(f"Missing keys: {missing}")
             if unexpected:
-                logger.warning(f"Unexpected keys: {len(unexpected)} keys")
+                logger.warning(f"Unexpected keys when loading weights: {len(unexpected)} keys")
                 
         except Exception as e:
-            logger.error(f"Error loading state dict: {e}")
-            logger.warning("Continuing with uninitialized weights - model may not work correctly")
+            logger.error(f"Failed to load weights: {e}")
+            raise
     
     def forward(self, 
                latents: List[torch.Tensor], 
@@ -212,106 +143,56 @@ class WanDiT(DiffusionModel):
                text_embeds: List[torch.Tensor], 
                **kwargs) -> Tuple[List[torch.Tensor], Optional[Dict]]:
         """
-        Forward pass through diffusion model based on wan/modules/model.py.
+        Forward pass through diffusion model.
         
         Args:
             latents: List of latent tensors
             timestep: Current timestep
             text_embeds: Text embeddings for conditioning
             **kwargs: Additional arguments
-                - seq_len: Sequence length
-                - is_uncond: Whether this is unconditional generation
-        """
-        # Process inputs
-        results = []
-        seq_len = kwargs.get("seq_len", None)
-        
-        for i, (latent, text_embed) in enumerate(zip(latents, text_embeds)):
-            # Ensure device consistency
-            t = timestep.to(latent.device)
-            if len(t.shape) == 0:
-                t = t.view(1)
-                
-            # Ensure freqs is on the right device
-            if self.freqs.device != latent.device:
-                self.freqs = self.freqs.to(latent.device)
-            
-            # Embed time
-            time_embed = self.time_embedding(self._sinusoidal_embedding(self.freq_dim, t))
-            time_proj = self.time_projection(time_embed)
-            
-            # Apply patches
-            x = self.patch_embedding(latent)
-            
-            # Calculate grid sizes for position encoding
-            grid_sizes = torch.tensor([[x.shape[2], x.shape[3], x.shape[4]]], device=x.device)
-            
-            # Reshape to sequence
-            batch_size = x.shape[0]
-            x = x.flatten(2).transpose(1, 2)
-            
-            # Process through transformer blocks with position encoding
-            for block in self.blocks:
-                x = block(
-                    x,
-                    time_proj,
-                    torch.tensor([seq_len], device=x.device),
-                    grid_sizes,
-                    self.freqs,
-                    text_embed,
-                    None  # context_lens
-                )
-            
-            # Apply head to get output
-            output = self.head(x, time_embed)
-            
-            # Add to results
-            results.append(output)
-            
-        return results, None
-    
-    def _sinusoidal_embedding(self, dim, position):
-        """Generate sinusoidal embedding for position."""
-        # Match the implementation in wan/modules/model.py
-        half = dim // 2
-        pos = position.float()
-        
-        # Calculate sinusoid embedding
-        emb = torch.log(torch.tensor(10000.0)) / half
-        emb = torch.exp(torch.arange(half, device=pos.device) * -emb)
-        emb = pos.view(-1, 1) * emb.view(1, -1)
-        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
-        
-        if dim % 2 == 1:
-            emb = torch.cat([emb, torch.zeros_like(emb[:, :1])], dim=-1)
-            
-        return emb
-    
-    def unpatchify(self, x, grid_sizes):
-        """
-        Reshape from sequence to video.
-        
-        Args:
-            x: Output tensor with shape [B, L, C]
-            grid_sizes: Tensor with video dimensions [B, 3]
             
         Returns:
-            Unpatchified tensor with shape [B, C, F, H, W]
+            Tuple of (predicted noise, optional auxiliary outputs)
         """
-        c = self.out_channels
+        # Default sequence length if not provided
+        seq_len = kwargs.get('seq_len', None)
+        if seq_len is None:
+            # Calculate from first latent tensor
+            latent = latents[0]
+            seq_len = latent.shape[2] * latent.shape[3] * latent.shape[4]
         
-        # Unpatchify for each item in batch
-        out = []
-        for u, v in zip(x, grid_sizes.tolist()):
-            f, h, w = v
-            # Reshape to 5D tensor: [F, H, W, *patch_size, C]
-            u = u[:f*h*w].view(f, h, w, *self.patch_size, c)
-            # Permute dimensions to [C, F, H*patch_h, W*patch_w]
-            u = torch.einsum('fhwpqrc->cfphqwr', u)
-            u = u.reshape(c, f, h*self.patch_size[1], w*self.patch_size[2])
-            out.append(u)
+        # Forward pass through model
+        with torch.no_grad():
+            outputs = self.model(
+                latents, 
+                timestep, 
+                text_embeds, 
+                seq_len=seq_len,
+                clip_fea=kwargs.get('clip_fea'),
+                y=kwargs.get('y')
+            )
         
-        return out
+        return outputs, None
+        
+    def to(self, device: Optional[torch.device] = None, 
+           dtype: Optional[torch.dtype] = None) -> "WanDiT":
+        """
+        Move model to specified device and dtype.
+        
+        Args:
+            device: Target device
+            dtype: Target dtype
+            
+        Returns:
+            Self for chaining
+        """
+        super().to(device, dtype)
+        
+        # Move model
+        if device is not None or dtype is not None:
+            self.model.to(device=device, dtype=dtype)
+            
+        return self
     
 class WanAttentionBlock(nn.Module):
     """
