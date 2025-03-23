@@ -53,38 +53,34 @@ class WanVideoPipeline(Pipeline):
         
         logger.info(f"Initialized WanVideoPipeline with dtype={self.dtype}, device={self.device}")
         
-    def _init_components(self):
-        """Initialize pipeline components."""
-        # Track memory before loading
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()  # Reset peak stats
-            init_allocated = torch.cuda.memory_allocated() / 1024**3
-            init_reserved = torch.cuda.memory_reserved() / 1024**3
-            logger.info(f"Initial GPU memory: {init_allocated:.2f}GB allocated, {init_reserved:.2f}GB reserved")
+    def _init_components(s):
+        """Init pipeline components."""
+        # Track memory
+        m=lambda:torch.cuda.memory_allocated()/1024**3 if torch.cuda.is_available() else 0
+        m0=m()
         
-        # Load components with progress tracking
+        # Load text encoder
         logger.info("Loading text encoder...")
-        self.text_encoder = self._load_text_encoder()
-        if torch.cuda.is_available():
-            text_enc_allocated = torch.cuda.memory_allocated() / 1024**3
-            text_enc_peak = torch.cuda.max_memory_allocated() / 1024**3
-            logger.info(f"After text encoder: {text_enc_allocated:.2f}GB allocated, {text_enc_peak:.2f}GB peak")
-   
+        s.text_encoder=s._load_text_encoder()
+        m1=m()
         
+        # Load diffusion model
         logger.info("Loading diffusion model...")
-        self.diffusion_model = self._load_diffusion_model()
-        if torch.cuda.is_available():
-            diff_allocated = torch.cuda.memory_allocated() / 1024**3
-            logger.info(f"After diffusion model: {diff_allocated:.2f}GB allocated (+{diff_allocated - text_enc_allocated:.2f}GB)")
+        s.diffusion_model=s._load_diffusion_model()
+        m2=m()
         
+        # Load VAE
         logger.info("Loading VAE...")
-        self.vae = self._load_vae()
-        if torch.cuda.is_available():
-            vae_allocated = torch.cuda.memory_allocated() / 1024**3
-            logger.info(f"After VAE: {vae_allocated:.2f}GB allocated (+{vae_allocated - diff_allocated:.2f}GB)")
+        s.vae=s._load_vae()
+        m3=m()
         
+        # Load scheduler
         logger.info("Loading scheduler...")
-        self.scheduler = self._load_scheduler()
+        s.scheduler=s._load_scheduler()
+        
+        # Log memory stats
+        if torch.cuda.is_available():
+            logger.info(f"Memory: init={m0:.1f}GB → T5={m1:.1f}GB → DiT={m2:.1f}GB → VAE={m3:.1f}GB")
         
     def _init_generation_config(self):
         """Initialize generation config from defaults."""
@@ -281,9 +277,9 @@ class WanVideoPipeline(Pipeline):
         gs=kw.pop("guidance_scale",self.generation_config["guidance_scale"])
         g=kw.pop("generator",None); ot=kw.pop("output_type","pil")
         
-        # Ensure dimensions are divisible by 8
-        height = height - height % 8
-        width = width - width % 8
+        # # Ensure dimensions are divisible by 8
+        # height = height - height % 8
+        # width = width - width % 8
         
         # Encode text
         logger.info(f"Encoding: '{p}'")
@@ -299,9 +295,9 @@ class WanVideoPipeline(Pipeline):
         self.scheduler.set_timesteps(ns,device=self.device)
         ts=self.scheduler.timesteps
         
-        # Get latent size (dividing dimensions by VAE stride)
-        latent_height = height // 8
-        latent_width = width // 8
+        # # Get latent size (dividing dimensions by VAE stride)
+        # latent_height = height // 8
+        # latent_width = width // 8
         
         # Generate initial noise
         logger.info(f"Generating latents: frames={nf}, height={latent_height}, width={latent_width}")
