@@ -8,6 +8,7 @@ from .dtype import DtypeManager
 __all__ = [
     'Component',
     'Registry',
+    'register_component',
     'ComponentFactory',
     'ConfigManager',
     'DtypeManager'

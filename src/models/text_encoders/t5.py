@@ -2,15 +2,18 @@
 import torch
 import torch.nn as nn
 import logging
-from typing import List, Dict, Any, Union, Optional
+from typing import List, Dict, Any, Text, Union, Optional
 from pathlib import Path
 from transformers import T5EncoderModel, AutoTokenizer
 
 from src.core.component import Component
+from src.core import Registry
+from src.core.registry import register_component
 from src.models.text_encoders.base import TextEncoder
 
 logger = logging.getLogger(__name__)
 
+@register_component("T5TextEncoder", TextEncoder)
 class T5TextEncoder(TextEncoder):
     """
     T5-based text encoder for WanVideo.

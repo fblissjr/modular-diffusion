@@ -8,9 +8,11 @@ from pathlib import Path
 from src.core.component import Component
 from src.models.vae.base import VAE
 from src.configs.models.wanvideo.vae import WanVAE as OriginalWanVAE
+from src.core.registry import register_component
 
 logger = logging.getLogger(__name__)
 
+@register_component("WanVAEAdapter", VAE)
 class WanVAEAdapter(VAE):
     """
     Adapter for WanVideo VAE.

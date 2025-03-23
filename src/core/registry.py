@@ -3,6 +3,22 @@ from typing import Dict, Type, Any, Optional, TypeVar, Generic
 
 T = TypeVar('T')
 
+def register_component(name: str, base_class: Type[T]):
+    """
+    Decorator for registering components.
+    
+    Args:
+        name: Registration name
+        base_class: Base class for component
+        
+    Returns:
+        Decorator function
+    """
+    def decorator(cls: Type[T]) -> Type[T]:
+        registry = Registry.get(base_class)
+        return registry.register(name, cls)
+    return decorator
+
 class Registry(Generic[T]):
     """
     Registry for component types.
@@ -12,7 +28,6 @@ class Registry(Generic[T]):
     """
     
     _instances: Dict[Type, "Registry"] = {}
-    
     def __init__(self, base_class: Type[T]):
         """
         Initialize registry for a base class.
@@ -51,6 +66,7 @@ class Registry(Generic[T]):
         """
         self.registry[name] = component_class
         return component_class
+
     
     def create(self, name: str, config: Dict[str, Any]) -> T:
         """

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 from src.core.component import Component
 from src.models.diffusion.base import DiffusionModel
+from src.core.registry import register_component
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +210,7 @@ class WanViTBlock(nn.Module):
         
         return x
 
+@register_component("WanDiT", DiffusionModel)
 class WanDiT(DiffusionModel):
     """
     WanDiT Diffusion Transformer model.
