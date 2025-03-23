@@ -2,14 +2,15 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Union, Optional, Tuple
 import torch
-from src.core.component import Component
 
-class DiffusionModel(Component, ABC):
+from src.core.torch_component import TorchComponent
+
+class DiffusionModel(TorchComponent, ABC):
     """
     Base interface for diffusion models.
     
     This provides a common interface for different diffusion models,
-    similar to how LLM decoders have standard interfaces.
+    using PyTorch as the underlying engine.
     """
     
     def __init__(self, config: Dict[str, Any]):
@@ -37,9 +38,6 @@ class DiffusionModel(Component, ABC):
             timestep: Current timestep
             text_embeds: Text embeddings for conditioning
             **kwargs: Additional arguments
-                - seq_len: Sequence length
-                - is_uncond: Whether this is unconditional
-                - current_step_percentage: Current step progress
             
         Returns:
             Tuple of (predicted noise, optional auxiliary outputs)

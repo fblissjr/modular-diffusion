@@ -1,13 +1,13 @@
-# src/models/text_encoders/t5.py
+# In src/models/text_encoders/t5.py
 import torch
 import torch.nn as nn
 import logging
-from typing import List, Dict, Any, Text, Union, Optional
+from typing import List, Dict, Any, Union, Optional
 from pathlib import Path
-from transformers import T5EncoderModel, AutoTokenizer
+from transformers import T5EncoderModel, AutoTokenizer, AutoConfig
+import safetensors.torch
 
 from src.core.component import Component
-from src.core import Registry
 from src.core.registry import register_component
 from src.models.text_encoders.base import TextEncoder
 
@@ -17,20 +17,19 @@ logger = logging.getLogger(__name__)
 class T5TextEncoder(TextEncoder):
     """
     T5-based text encoder for WanVideo.
-    
-    This loads a pre-trained T5 encoder model and provides methods
-    to encode text prompts into embeddings, similar to how LLM
-    tokenizers and embedding modules work together.
     """
     
     def __init__(self, config: Dict[str, Any]):
-        """
-        Initialize T5 text encoder.
-        
-        Args:
-            config: Text encoder configuration
-        """
+        """Initialize T5 text encoder."""
         super().__init__(config)
+
+        if 'test_mode' in config and config['test_mode']:
+            # Create dummy tokenizer and model for testing
+            logger.warning("Running T5TextEncoder in test mode with dummy model")
+            self.tokenizer = None
+            self.t5_model = nn.Module()  # Empty module
+            self.max_length = max_length
+            return
         
         # Get paths and parameters
         model_path = config.get("model_path")
@@ -40,12 +39,31 @@ class T5TextEncoder(TextEncoder):
         tokenizer_name = config.get("tokenizer", "google/umt5-xxl")
         max_length = config.get("max_length", 512)
         
-        # Load tokenizer
+        # Load tokenizer directly from HuggingFace
+        logger.info(f"Loading tokenizer from {tokenizer_name}")
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         
-        # Load model
+        # Load model - special handling for safetensors
         logger.info(f"Loading T5 encoder from {model_path}")
-        self.t5_model = T5EncoderModel.from_pretrained(model_path)
+        model_path = Path(model_path)
+        
+        if model_path.is_file() and str(model_path).endswith('.safetensors'):
+            # Create a model config for UMT5-XXL
+            logger.info("Creating model from safetensors file")
+            model_config = AutoConfig.from_pretrained(tokenizer_name)
+            
+            # Create empty model with the right config
+            self.t5_model = T5EncoderModel(config=model_config)
+            
+            # Load weights from safetensors
+            logger.info(f"Loading weights from {model_path}")
+            state_dict = safetensors.torch.load_file(model_path)
+            
+            # Load state dict
+            self.t5_model.load_state_dict(state_dict, strict=False)
+        else:
+            # Standard loading
+            self.t5_model = T5EncoderModel.from_pretrained(model_path)
         
         # Move to device and set dtype
         self.t5_model.to(self.device, self.dtype)
@@ -56,7 +74,7 @@ class T5TextEncoder(TextEncoder):
         # Store config
         self.max_length = max_length
         
-        logger.info(f"Initialized T5TextEncoder with tokenizer={tokenizer_name}, max_length={max_length}")
+        logger.info(f"Initialized T5TextEncoder with max_length={max_length}")
         
     def encode(
         self, 

@@ -54,10 +54,35 @@ class WanVideoPipeline(Pipeline):
         
     def _init_components(self):
         """Initialize pipeline components."""
-        # Load components
+        from tqdm import tqdm
+        
+        # Track memory before loading
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            init_allocated = torch.cuda.memory_allocated() / 1024**3
+            init_reserved = torch.cuda.memory_reserved() / 1024**3
+            logger.info(f"Initial GPU memory: {init_allocated:.2f}GB allocated, {init_reserved:.2f}GB reserved")
+        
+        # Load components with progress tracking
+        logger.info("Loading text encoder...")
         self.text_encoder = self._load_text_encoder()
+        if torch.cuda.is_available():
+            text_enc_allocated = torch.cuda.memory_allocated() / 1024**3
+            logger.info(f"After text encoder: {text_enc_allocated:.2f}GB allocated (+{text_enc_allocated - init_allocated:.2f}GB)")
+        
+        logger.info("Loading diffusion model...")
         self.diffusion_model = self._load_diffusion_model()
+        if torch.cuda.is_available():
+            diff_allocated = torch.cuda.memory_allocated() / 1024**3
+            logger.info(f"After diffusion model: {diff_allocated:.2f}GB allocated (+{diff_allocated - text_enc_allocated:.2f}GB)")
+        
+        logger.info("Loading VAE...")
         self.vae = self._load_vae()
+        if torch.cuda.is_available():
+            vae_allocated = torch.cuda.memory_allocated() / 1024**3
+            logger.info(f"After VAE: {vae_allocated:.2f}GB allocated (+{vae_allocated - diff_allocated:.2f}GB)")
+        
+        logger.info("Loading scheduler...")
         self.scheduler = self._load_scheduler()
         
     def _init_generation_config(self):

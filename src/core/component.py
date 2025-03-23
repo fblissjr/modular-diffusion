@@ -1,6 +1,6 @@
 # src/core/component.py
 from abc import ABC, abstractmethod
-import torch
+import torch  # Still needed for torch.device type hints
 from typing import Optional, Dict, Any, Union
 
 class Component(ABC):
@@ -8,8 +8,7 @@ class Component(ABC):
     Base interface for all pipeline components.
     
     This provides consistent handling of device, dtype, and configuration
-    across all components in the system, similar to how LLM engines
-    have standardized component interfaces.
+    across all components in the system, while remaining engine-agnostic.
     """
     
     def __init__(self, config: Dict[str, Any]):

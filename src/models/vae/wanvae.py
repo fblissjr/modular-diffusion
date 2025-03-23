@@ -43,10 +43,10 @@ class WanVAEAdapter(VAE):
         # VAE parameters
         z_dim = config.get("z_dim", 16)
         
-        # Create original VAE
+        # Create original VAE with the correct path
         self.vae = OriginalWanVAE(
             z_dim=z_dim,
-            vae_pth=str(checkpoint_path),
+            vae_pth=model_path,
             dtype=self.dtype,
             device=self.device
         )

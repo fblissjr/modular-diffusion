@@ -11,5 +11,6 @@ __all__ = [
     'register_component',
     'ComponentFactory',
     'ConfigManager',
-    'DtypeManager'
+    'DtypeManager',
+    'TorchComponent',
 ]
