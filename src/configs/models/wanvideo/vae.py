@@ -588,7 +588,6 @@ class WanVAE_(nn.Module):
         self._enc_conv_idx = [0]
         self._enc_feat_map = [None] * self._enc_conv_num
 
-
 def _video_vae(pretrained_path=None, z_dim=None, device='cpu', **kwargs):
     """
     Autoencoder3d adapted from Stable Diffusion 1.x, 2.x and XL.
@@ -608,12 +607,16 @@ def _video_vae(pretrained_path=None, z_dim=None, device='cpu', **kwargs):
     with torch.device('meta'):
         model = WanVAE_(**cfg)
 
-    # load checkpoint
+    # load checkpoint - use safetensors for .safetensors files
     logging.info(f'loading {pretrained_path}')
-    model.load_state_dict(
-        torch.load(pretrained_path, map_location=device, weights_only=False), 
-        assign=True)
-
+    if str(pretrained_path).endswith('.safetensors'):
+        import safetensors.torch
+        state_dict = safetensors.torch.load_file(pretrained_path, device=device)
+    else:
+        # For regular .pth files
+        state_dict = torch.load(pretrained_path, map_location=device, weights_only=False)
+        
+    model.load_state_dict(state_dict, assign=True)
     return model
 
 

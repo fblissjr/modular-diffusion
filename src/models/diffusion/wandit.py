@@ -136,38 +136,49 @@ class WanDiT(DiffusionModel):
         
         # Try to load state dict
         try:
-            # Print state dict keys for debugging
+            # Get model and file keys for comparison
             model_keys = set(self.state_dict().keys())
             file_keys = set(state_dict.keys())
             
-            # Get key prefixes for diagnosis
-            model_prefixes = set([k.split('.')[0] for k in model_keys])
-            file_prefixes = set([k.split('.')[0] for k in file_keys])
+            # Look at some example keys for diagnostics
+            logger.debug(f"Model key examples: {list(model_keys)[:5]}")
+            logger.debug(f"File key examples: {list(file_keys)[:5]}")
             
-            logger.debug(f"Model key prefixes: {model_prefixes}")
-            logger.debug(f"File key prefixes: {file_prefixes}")
+            # Check if there's a prefix mismatch
+            if len(model_keys) > 0 and len(file_keys) > 0:
+                model_prefix = list(model_keys)[0].split('.')[0]
+                file_prefix = list(file_keys)[0].split('.')[0]
+                
+                if model_prefix != file_prefix:
+                    logger.info(f"Key prefix mismatch: model uses '{model_prefix}', file uses '{file_prefix}'")
+                    
+                    # Try to adjust keys if needed
+                    if file_prefix and not any(k.startswith(file_prefix) for k in model_keys):
+                        # Remove prefix from file keys
+                        logger.info(f"Attempting to remove prefix '{file_prefix}' from file keys")
+                        new_state_dict = {}
+                        prefix_len = len(file_prefix) + 1  # +1 for the dot
+                        for k, v in state_dict.items():
+                            if k.startswith(f"{file_prefix}."):
+                                new_state_dict[k[prefix_len:]] = v
+                            else:
+                                new_state_dict[k] = v
+                        state_dict = new_state_dict
             
-            # Compute key differences
-            missing_prefixes = model_prefixes - file_prefixes
-            unexpected_prefixes = file_prefixes - model_prefixes
-            
-            if missing_prefixes:
-                logger.debug(f"Missing key prefixes: {missing_prefixes}")
-            if unexpected_prefixes:
-                logger.debug(f"Unexpected key prefixes: {unexpected_prefixes}")
-            
-            # Try loading
+            # Try loading with adjusted state dict
             missing, unexpected = self.load_state_dict(state_dict, strict=False)
             
             if missing:
                 logger.warning(f"Missing keys: {len(missing)} keys")
-                if len(missing) < 10:
-                    logger.debug(f"Missing keys: {missing}")
+                # Show a few examples of missing keys
+                if missing:
+                    logger.debug(f"Missing key examples: {missing[:5]}")
                     
             if unexpected:
                 logger.warning(f"Unexpected keys: {len(unexpected)} keys")
-                if len(unexpected) < 10:
-                    logger.debug(f"Unexpected keys: {unexpected}")
+                # Show a few examples of unexpected keys
+                if unexpected:
+                    logger.debug(f"Unexpected key examples: {unexpected[:5]}")
                     
         except Exception as e:
             logger.error(f"Failed to load state dict: {e}")

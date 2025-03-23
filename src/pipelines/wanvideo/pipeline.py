@@ -54,11 +54,9 @@ class WanVideoPipeline(Pipeline):
         
     def _init_components(self):
         """Initialize pipeline components."""
-        from tqdm import tqdm
-        
         # Track memory before loading
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()  # Reset peak stats
             init_allocated = torch.cuda.memory_allocated() / 1024**3
             init_reserved = torch.cuda.memory_reserved() / 1024**3
             logger.info(f"Initial GPU memory: {init_allocated:.2f}GB allocated, {init_reserved:.2f}GB reserved")
@@ -68,7 +66,9 @@ class WanVideoPipeline(Pipeline):
         self.text_encoder = self._load_text_encoder()
         if torch.cuda.is_available():
             text_enc_allocated = torch.cuda.memory_allocated() / 1024**3
-            logger.info(f"After text encoder: {text_enc_allocated:.2f}GB allocated (+{text_enc_allocated - init_allocated:.2f}GB)")
+            text_enc_peak = torch.cuda.max_memory_allocated() / 1024**3
+            logger.info(f"After text encoder: {text_enc_allocated:.2f}GB allocated, {text_enc_peak:.2f}GB peak")
+   
         
         logger.info("Loading diffusion model...")
         self.diffusion_model = self._load_diffusion_model()
