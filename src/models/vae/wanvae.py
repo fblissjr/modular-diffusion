@@ -24,7 +24,7 @@ class WanVAEAdapter(VAE):
     
     def __init__(self, config: Dict[str, Any]):
         """
-        Initialize WanVAE adapter.
+        Initialize WanVAE adapter with proper error handling.
         
         Args:
             config: VAE configuration

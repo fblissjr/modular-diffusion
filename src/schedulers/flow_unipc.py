@@ -4,9 +4,11 @@ import numpy as np
 import logging
 from typing import Dict, List, Union, Tuple, Optional, Any
 from src.schedulers.base import Scheduler
+from src.core.registry import register_component
 
 logger = logging.getLogger(__name__)
 
+@register_component("FlowUniPCScheduler", Scheduler)
 class FlowUniPCScheduler(Scheduler):
     """
     Flow matching UniPC scheduler.
