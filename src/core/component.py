@@ -26,18 +26,19 @@ class Component(ABC):
     def _resolve_device(self) -> torch.device:
         """Resolve component device from config."""
         d=self.config.get("device")
-        return torch.device(d if d is not None else "cuda")
+        if d is None:d="cuda" if torch.cuda.is_available() else "cpu"
+        return torch.device(d)
+
     
     def _resolve_dtype(self) -> torch.dtype:
         """Resolve component dtype from config."""
-        dtype_str = self.config.get("dtype", "fp32")
-        dtype_map = {
-            "fp32": torch.float32,
-            "fp16": torch.float16,
-            "bf16": torch.bfloat16
-        }
-        return dtype_map.get(dtype_str, torch.float32)
-    
+        dt=self.config.get("dtype")
+        if isinstance(dt,torch.dtype):return dt
+        m={"fp32":torch.float32,"fp16":torch.float16,"bf16":torch.bfloat16,"f32":torch.float32,"f16":torch.float16}
+        if dt in m:return m[dt]
+        if dt=="fp8" and hasattr(torch,"float8_e4m3fn"):return torch.float8_e4m3fn
+        return torch.float32
+
     @property
     def device(self) -> torch.device:
         """Get component's primary computation device."""
