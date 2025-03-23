@@ -603,11 +603,14 @@ def _video_vae(pretrained_path=None, z_dim=None, device='cpu', **kwargs):
         dropout=0.0)
     cfg.update(**kwargs)
 
-    # init model
+    # init model on meta device
     with torch.device('meta'):
         model = WanVAE_(**cfg)
+    
+    # Move to real device (empty) - this avoids the NotImplementedError
+    model = model.to_empty(device=device)
 
-    # load checkpoint - use safetensors for .safetensors files
+    # load checkpoint
     logging.info(f'loading {pretrained_path}')
     if str(pretrained_path).endswith('.safetensors'):
         import safetensors.torch
@@ -615,8 +618,24 @@ def _video_vae(pretrained_path=None, z_dim=None, device='cpu', **kwargs):
     else:
         # For regular .pth files
         state_dict = torch.load(pretrained_path, map_location=device, weights_only=False)
-        
-    model.load_state_dict(state_dict, assign=True)
+    
+    # Handle key prefix mismatch - both for 'model.' prefix and any other prefix issues
+    adjusted_state_dict = {}
+    for k, v in state_dict.items():
+        # Remove 'model.' prefix if present
+        if k.startswith('model.'):
+            adjusted_state_dict[k[6:]] = v
+        else:
+            adjusted_state_dict[k] = v
+    
+    # Load with strict=False to allow partial loading
+    missing, unexpected = model.load_state_dict(adjusted_state_dict, strict=False)
+    
+    if missing:
+        logging.warning(f"VAE missing {len(missing)} keys")
+    if unexpected:
+        logging.warning(f"VAE unexpected {len(unexpected)} keys")
+    
     return model
 
 

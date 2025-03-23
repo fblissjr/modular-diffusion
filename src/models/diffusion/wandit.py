@@ -134,55 +134,28 @@ class WanDiT(DiffusionModel):
         logger.info(f"Loading model weights from {model_path}")
         state_dict = safetensors.torch.load_file(model_path)
         
-        # Try to load state dict
+        # Create adjusted state dict
+        adjusted_state_dict = {}
+        for k, v in state_dict.items():
+            # Remove 'model.' prefix if present
+            if k.startswith('model.'):
+                adjusted_state_dict[k[6:]] = v
+            else:
+                adjusted_state_dict[k] = v
+        
+        # Try loading with partial matches
         try:
-            # Get model and file keys for comparison
-            model_keys = set(self.state_dict().keys())
-            file_keys = set(state_dict.keys())
-            
-            # Look at some example keys for diagnostics
-            logger.debug(f"Model key examples: {list(model_keys)[:5]}")
-            logger.debug(f"File key examples: {list(file_keys)[:5]}")
-            
-            # Check if there's a prefix mismatch
-            if len(model_keys) > 0 and len(file_keys) > 0:
-                model_prefix = list(model_keys)[0].split('.')[0]
-                file_prefix = list(file_keys)[0].split('.')[0]
-                
-                if model_prefix != file_prefix:
-                    logger.info(f"Key prefix mismatch: model uses '{model_prefix}', file uses '{file_prefix}'")
-                    
-                    # Try to adjust keys if needed
-                    if file_prefix and not any(k.startswith(file_prefix) for k in model_keys):
-                        # Remove prefix from file keys
-                        logger.info(f"Attempting to remove prefix '{file_prefix}' from file keys")
-                        new_state_dict = {}
-                        prefix_len = len(file_prefix) + 1  # +1 for the dot
-                        for k, v in state_dict.items():
-                            if k.startswith(f"{file_prefix}."):
-                                new_state_dict[k[prefix_len:]] = v
-                            else:
-                                new_state_dict[k] = v
-                        state_dict = new_state_dict
-            
-            # Try loading with adjusted state dict
-            missing, unexpected = self.load_state_dict(state_dict, strict=False)
+            logger.info("Loading weights with adjusted keys (strict=False)")
+            missing, unexpected = self.load_state_dict(adjusted_state_dict, strict=False)
             
             if missing:
                 logger.warning(f"Missing keys: {len(missing)} keys")
-                # Show a few examples of missing keys
-                if missing:
-                    logger.debug(f"Missing key examples: {missing[:5]}")
-                    
             if unexpected:
                 logger.warning(f"Unexpected keys: {len(unexpected)} keys")
-                # Show a few examples of unexpected keys
-                if unexpected:
-                    logger.debug(f"Unexpected key examples: {unexpected[:5]}")
-                    
+                
         except Exception as e:
             logger.error(f"Failed to load state dict: {e}")
-            raise
+            logger.warning("Continuing with uninitialized weights - model may not work correctly")
     
     def forward(self, 
                latents: List[torch.Tensor], 

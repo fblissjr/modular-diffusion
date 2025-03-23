@@ -3,6 +3,7 @@ import torch
 import logging
 import os
 import sys
+import tqdm
 from pathlib import Path
 
 # Add parent directory to path
@@ -27,7 +28,20 @@ def main():
         
         # Set up configuration
         config = {
-            "model_path": "./checkpoints",  # Base path
+            "model_path": "./models",  # Base path
+            "text_encoder": {
+                "type": "T5TextEncoder",
+                "model_path": "./models/text_encoder/umt5-xxl/umt5-xxl-enc-bf16.safetensors",
+                "tokenizer": "google/umt5-xxl"  # Use HF model ID directly
+            },
+            "diffusion_model": {
+                "type": "WanDiT",
+                "model_path": "./models/dit/Wan2.1-T2V-1.3B" # Directory containing safetensors
+            },
+            "vae": {
+                "type": "WanVAEAdapter",
+                "model_path": "./models/vae/WanVideo/Wan2_1_VAE_bf16.safetensors"
+            },
             "device": "cuda" if torch.cuda.is_available() else "cpu",
             "dtype": "bf16" if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else "fp32",
             # Minimal generation config for test
