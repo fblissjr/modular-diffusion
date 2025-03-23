@@ -25,8 +25,8 @@ class Component(ABC):
         
     def _resolve_device(self) -> torch.device:
         """Resolve component device from config."""
-        device_str = self.config.get("device", "cuda")
-        return torch.device(device_str)
+        d=self.config.get("device")
+        return torch.device(d if d is not None else "cuda")
     
     def _resolve_dtype(self) -> torch.dtype:
         """Resolve component dtype from config."""

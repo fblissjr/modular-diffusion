@@ -264,8 +264,8 @@ class WanVideoPipeline(Pipeline):
         t0=time.time()
         
         # Get generation parameters (update defaults with kwargs)
-        prompt = kw.pop("prompt")
-        if not prompt:
+        p = kw.pop("prompt")
+        if not p:
             raise ValueError("prompt is required")
             
         # Get parameters with defaults from config
@@ -300,7 +300,7 @@ class WanVideoPipeline(Pipeline):
         # latent_width = width // 8
         
         # Generate initial noise
-        logger.info(f"Generating latents: frames={nf}, height={latent_height}, width={latent_width}")
+        logger.info(f"Generating latents: frames={nf}, height={lh}, width={lw}")
 
         # Diffusion process
         logger.info(f"Running {ns} steps")
