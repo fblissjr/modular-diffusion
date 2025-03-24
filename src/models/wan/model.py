@@ -131,6 +131,7 @@ class WanModel(nn.Module):
         # Initialize weights
         self.init_weights()
 
+    # latest fix: make time embedding use correct dtype
     def forward(
         self,
         x,
@@ -159,6 +160,21 @@ class WanModel(nn.Module):
         if self.freqs.device != device:
             self.freqs = self.freqs.to(device)
 
+        # move to right device
+        device = self.patch_embedding.weight.device
+
+        # handle timestep dtype explicitly - this is critical!
+        if isinstance(t, torch.Tensor):
+            t = t.to(device=device, dtype=self.dtype)
+
+        # disable autocast to avoid dtype issues
+        with torch.cuda.amp.autocast(enabled=False):
+            # compute time embeddings using consistent dtype
+            time_emb = sinusoidal_embedding_1d(self.freq_dim, t)
+            time_emb = time_emb.to(dtype=self.dtype)  # force correct dtype
+            e = self.time_embedding(time_emb)
+            e0 = self.time_projection(e).unflatten(1, (6, self.dim))
+
         # Concatenate conditional inputs if provided
         if y is not None:
             x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
@@ -175,10 +191,6 @@ class WanModel(nn.Module):
             torch.cat([u, u.new_zeros(1, seq_len - u.size(1), u.size(2))],
                     dim=1) for u in x
         ])
-
-        # Time embeddings
-        e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t))
-        e0 = self.time_projection(e).unflatten(1, (6, self.dim))
 
         # Context
         context_lens = None

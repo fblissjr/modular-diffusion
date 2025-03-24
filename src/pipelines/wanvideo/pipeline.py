@@ -262,38 +262,55 @@ class WanVideoPipeline(Pipeline):
         """
         # Start timer
         t0=time.time()
-        
+
         # Get generation parameters (update defaults with kwargs)
         p = kw.pop("prompt")
         if not p:
             raise ValueError("prompt is required")
-            
+
         # Get parameters with defaults from config
-        n_p=kw.pop("negative_prompt",self.generation_config["negative_prompt"])
-        h=kw.pop("height",self.generation_config["height"])-(kw.pop("height",self.generation_config["height"])%8)
-        w=kw.pop("width",self.generation_config["width"])-(kw.pop("width",self.generation_config["width"])%8)
-        nf=kw.pop("num_frames",self.generation_config["num_frames"])
-        ns=kw.pop("num_inference_steps",self.generation_config["num_inference_steps"])
-        gs=kw.pop("guidance_scale",self.generation_config["guidance_scale"])
-        g=kw.pop("generator",None); ot=kw.pop("output_type","pil")
-        
+        n_p = kw.pop("negative_prompt", self.generation_config["negative_prompt"])
+        h = kw.pop("height", self.generation_config["height"]) - (
+            kw.pop("height", self.generation_config["height"]) % 8
+        )
+        w = kw.pop("width", self.generation_config["width"]) - (
+            kw.pop("width", self.generation_config["width"]) % 8
+        )
+        nf = kw.pop("num_frames", self.generation_config["num_frames"])
+        ns = kw.pop(
+            "num_inference_steps", self.generation_config["num_inference_steps"]
+        )
+        gs = kw.pop("guidance_scale", self.generation_config["guidance_scale"])
+        g = kw.pop("generator", None)
+        ot = kw.pop("output_type", "pil")
+
         # # Ensure dimensions are divisible by 8
         # height = height - height % 8
         # width = width - width % 8
-        
+
         # Encode text
         logger.info(f"Encoding: '{p}'")
-        emb=self.text_encoder.encode(prompt=[p],negative_prompt=[n_p] if n_p else None)
-    
+        emb = self.text_encoder.encode(
+            prompt=[p], negative_prompt=[n_p] if n_p else None
+        )
+
         # Setup amd scale latents
-        lh,lw=h//8,w//8
+        lh, lw = h // 8, w // 8
         logger.info(f"Gen latents: f={nf}, h={lh}, w={lw}")
-        z=torch.randn((self.diffusion_model.in_channels,nf,lh,lw),generator=g,device=self.device,dtype=self.dtype)
-        zs=[z*self.scheduler.init_noise_sigma]
-        
+        z = torch.randn(
+            (self.diffusion_model.in_channels, nf, lh, lw),
+            generator=g,
+            device=self.device,
+            dtype=self.dtype,
+        )
+        zs = [z * self.scheduler.init_noise_sigma]
+
         # Setup steps
-        self.scheduler.set_timesteps(ns,device=self.device)
+        self.scheduler.set_timesteps(ns, device=self.device)
+
         ts=self.scheduler.timesteps
+        # update to set timestep dtype from the start:
+        ts = ts.to(device=self.device, dtype=self.dtype)
         
         # # Get latent size (dividing dimensions by VAE stride)
         # latent_height = height // 8

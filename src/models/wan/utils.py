@@ -14,54 +14,48 @@ import os.path as osp
 import imageio
 import torchvision
 
-def sinusoidal_embedding_1d(dim: int, position: torch.Tensor) -> torch.Tensor:
-    """
-    Create sinusoidal embeddings for 1D positions.
-    
-    Args:
-        dim (int): Embedding dimension (must be even)
-        position (torch.Tensor): Position tensor
-        
-    Returns:
-        torch.Tensor: Sinusoidal embeddings
-    """
-    # Preprocess
-    assert dim % 2 == 0
-    half = dim // 2
-    position = position.type(torch.float64)
+def sinusoidal_embedding_1d(dim, position):
+    """create time embeddings (similar to positional embeddings in llms)"""
+    # handle scalar inputs
+    if position.ndim == 0:
+        position = position.unsqueeze(0)
 
-    # Calculate embeddings
+    # use float32 for stable computation
+    position = position.float()
+
+    # calculate embeddings
+    half = dim // 2
     sinusoid = torch.outer(
-        position, 
-        torch.pow(10000, -torch.arange(half).to(position).div(half))
+        position,
+        torch.pow(10000, -torch.arange(half, device=position.device).float().div(half)),
     )
     x = torch.cat([torch.cos(sinusoid), torch.sin(sinusoid)], dim=1)
-    return x
+
+    # return as float32 - let caller handle dtype conversion
+    return x.float()
 
 
-@DtypeManager.no_autocast
 def rope_params(max_seq_len: int, dim: int, theta: int = 10000) -> torch.Tensor:
     """
     Calculate rotary position embedding parameters.
-    
+
     Args:
         max_seq_len (int): Maximum sequence length
         dim (int): Dimension of embedding (must be even)
         theta (int): Base for frequency calculation
-        
+
     Returns:
         torch.Tensor: Complex-valued frequency parameters
     """
     assert dim % 2 == 0
     freqs = torch.outer(
         torch.arange(max_seq_len),
-        1.0 / torch.pow(theta, torch.arange(0, dim, 2).to(torch.float64).div(dim))
+        1.0 / torch.pow(theta, torch.arange(0, dim, 2).to(torch.float64).div(dim)),
     )
     freqs = torch.polar(torch.ones_like(freqs), freqs)
     return freqs
 
 
-@DtypeManager.no_autocast
 def rope_apply(x: torch.Tensor, grid_sizes: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
     """
     Apply rotary position embeddings to input tensor.

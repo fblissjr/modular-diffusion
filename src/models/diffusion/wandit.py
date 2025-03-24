@@ -71,130 +71,165 @@ class WanDiT(DiffusionModel):
         logger.info(f"Initialized WanDiT with in_channels={self.in_channels}, out_channels={self.out_channels}")
     
     def _load_weights(self, model_path):
-        """
-        Load model weights.
-        
-        Args:
-            model_path: Path to model weights
-        """
+        """load model weights and ensure they're on the right device."""
         import os
         from pathlib import Path
         
         model_path = Path(model_path)
-        
-        # Find checkpoint file
+
+        # find checkpoint file
         if model_path.is_dir():
-            # Look for safetensors files first
+            # look for safetensors first
             safetensor_files = list(model_path.glob("*.safetensors"))
             if safetensor_files:
-                # Prefer models with specific datatypes
-                for suffix in ["bf16", "fp16", "fp32"]:
-                    for file in safetensor_files:
-                        if suffix in file.name.lower():
-                            checkpoint_path = file
-                            break
-                    if 'checkpoint_path' in locals():
-                        break
-                
-                # If no specific dtype found, use the first one
-                if 'checkpoint_path' not in locals():
-                    checkpoint_path = safetensor_files[0]
+                checkpoint_path = safetensor_files[0]
             else:
-                # Fall back to .pth files
+                # fall back to .pth files
                 pth_files = list(model_path.glob("*.pth"))
                 if not pth_files:
-                    raise FileNotFoundError(f"No model checkpoint files found in {model_path}")
+                    raise FileNotFoundError(
+                        f"no model checkpoint files found in {model_path}"
+                    )
                 checkpoint_path = pth_files[0]
         else:
             checkpoint_path = model_path
-        
-        # Load weights
-        logger.info(f"Loading model weights from {checkpoint_path}")
+
+        # load weights
+        logger.info(f"loading model weights from {checkpoint_path}")
         try:
             if str(checkpoint_path).endswith('.safetensors'):
                 import safetensors.torch
                 state_dict = safetensors.torch.load_file(checkpoint_path, device='cpu')
             else:
                 state_dict = torch.load(checkpoint_path, map_location='cpu')
-                
-            # Handle 'model.' prefix if present
+
+            # handle 'model.' prefix if present
             adjusted_state_dict = {}
             for k, v in state_dict.items():
-                if k.startswith('model.'):
+                if k.startswith("model."):
                     adjusted_state_dict[k[6:]] = v
                 else:
                     adjusted_state_dict[k] = v
-            
-            # Load weights with non-strict matching to allow for differences
+
+            # load weights with non-strict matching
             missing, unexpected = self.model.load_state_dict(adjusted_state_dict, strict=False)
-            
+
+            # debug weight mismatch - log some examples to understand pattern
+            if len(missing) > 0 and len(unexpected) > 0:
+                # group keys by prefix pattern
+                missing_prefixes = {}
+                for k in list(missing)[:5]:
+                    prefix = k.split(".")[0]
+                    missing_prefixes[prefix] = missing_prefixes.get(prefix, 0) + 1
+
+                unexpected_prefixes = {}
+                for k in list(unexpected)[:5]:
+                    prefix = k.split(".")[0]
+                    unexpected_prefixes[prefix] = unexpected_prefixes.get(prefix, 0) + 1
+
+                logger.warning(f"missing key examples: {list(missing)[:3]}")
+                logger.warning(f"unexpected key examples: {list(unexpected)[:3]}")
+                logger.warning(f"missing prefixes: {missing_prefixes}")
+                logger.warning(f"unexpected prefixes: {unexpected_prefixes}")
+
+            # debug weight mismatch
+            if len(missing) > 10 and len(unexpected) > 10:
+                # sample a few keys to spot patterns
+                for i in range(3):
+                    m_key = list(missing)[i]
+                    u_key = list(unexpected)[i]
+                    logger.info(f"missing vs unexpected: {m_key} vs {u_key}")
+
+            if len(missing) > 100 and len(unexpected) > 100:
+                logger.info("attempting to fix key mismatches with remapping...")
+
+                # create new state dict with remapped keys
+                remapped_dict = {}
+
+                # map 'diffusion_model.X' keys to our format
+                for k, v in state_dict.items():
+                    # remove diffusion_model prefix
+                    if k.startswith("diffusion_model."):
+                        new_key = k.replace("diffusion_model.", "")
+
+                        # map block structure
+                        if "blocks." in new_key:
+                            parts = new_key.split(".")
+                            if len(parts) > 3:
+                                # try different mappings
+                                block_num = parts[1]
+                                component = parts[2]
+                                rest = ".".join(parts[3:])
+                                new_key = f"blocks.{block_num}.{component}.{rest}"
+
+                        remapped_dict[new_key] = v
+
+                    # try loading with remapped dict
+                    missing2, unexpected2 = self.model.load_state_dict(
+                        remapped_dict, strict=False
+                    )
+
+                    if len(missing2) < len(missing):
+                        logger.info(
+                            f"remapping reduced missing keys from {len(missing)} to {len(missing2)}"
+                        )
+
+            # move model to the correct device after loading weights
+            self.model = self.model.to(self.device)
+
             if missing:
-                logger.warning(f"Missing keys when loading weights: {len(missing)} keys")
-                if len(missing) < 10:
-                    logger.warning(f"Missing keys: {missing}")
+                logger.warning(
+                    f"missing keys when loading weights: {len(missing)} keys"
+                )
             if unexpected:
-                logger.warning(f"Unexpected keys when loading weights: {len(unexpected)} keys")
-                
+                logger.warning(
+                    f"unexpected keys when loading weights: {len(unexpected)} keys"
+                )
+
         except Exception as e:
-            logger.error(f"Failed to load weights: {e}")
+            logger.error(f"failed to load weights: {e}")
             raise
-    
-    def forward(self, 
-               latents: List[torch.Tensor], 
-               timestep: torch.Tensor, 
-               text_embeds: List[torch.Tensor], 
-               **kwargs) -> Tuple[List[torch.Tensor], Optional[Dict]]:
-        """
-        Forward pass through diffusion model.
-        
-        Args:
-            latents: List of latent tensors
-            timestep: Current timestep
-            text_embeds: Text embeddings for conditioning
-            **kwargs: Additional arguments
-            
-        Returns:
-            Tuple of (predicted noise, optional auxiliary outputs)
-        """
-        # Default sequence length if not provided
-        seq_len = kwargs.get('seq_len', None)
-        if seq_len is None:
-            # Calculate from first latent tensor
+
+    # add explicit dtype conversion
+    def forward(self, latents, timestep, text_embeds, **kwargs):
+        # ensure timestep is the right dtype before processing
+        if isinstance(timestep, torch.Tensor):
+            timestep = timestep.to(device=self.device, dtype=self.dtype)
+
+        # get sequence length from shape or kwargs
+        seq_len = kwargs.get("seq_len")
+        if not seq_len:
             latent = latents[0]
-            seq_len = latent.shape[2] * latent.shape[3] * latent.shape[4]
-        
-        # Forward pass through model
+            seq_len = (
+                latent.shape[1] * latent.shape[2] * latent.shape[3]
+                if len(latent.shape) == 4
+                else latent.shape[2] * latent.shape[3] * latent.shape[4]
+            )
+
+        # run forward with correct dtypes
         with torch.no_grad():
             outputs = self.model(
-                latents, 
-                timestep, 
-                text_embeds, 
+                latents,
+                timestep,  # now in correct dtype
+                text_embeds,
                 seq_len=seq_len,
-                clip_fea=kwargs.get('clip_fea'),
-                y=kwargs.get('y')
+                clip_fea=kwargs.get("clip_fea"),
+                y=kwargs.get("y"),
             )
         
         return outputs, None
-        
-    def to(self, device: Optional[torch.device] = None, 
-           dtype: Optional[torch.dtype] = None) -> "WanDiT":
-        """
-        Move model to specified device and dtype.
-        
-        Args:
-            device: Target device
-            dtype: Target dtype
-            
-        Returns:
-            Self for chaining
-        """
-        super().to(device, dtype)
-        
-        # Move model
-        if device is not None or dtype is not None:
-            self.model.to(device=device, dtype=dtype)
-            
-        return self
+
+        def to(self, device=None, dtype=None):
+            """make sure model components move to the right device and dtype"""
+            super().to(device, dtype)
+
+            # update internal model if device/dtype changes
+            if device is not None:
+                self.model = self.model.to(device)
+            if dtype is not None:
+                self.model = self.model.to(dtype)
+
+            return self
     
 class WanAttentionBlock(nn.Module):
     """

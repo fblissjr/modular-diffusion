@@ -50,35 +50,35 @@ class WanVAEAdapter(VAE):
         
     def encode(self, videos: List[torch.Tensor]) -> List[torch.Tensor]:
         """
-        Encode videos to latent tensors.
-        
-        Args:
-            videos: List of video tensors [C, T, H, W]
-            
-        Returns:
-            List of latent tensors
+        encode videos to latent tensors with proper cache management.
         """
-        # Ensure videos are on the correct device and dtype
+        # ensure videos are on the correct device/dtype
         videos = [v.to(self.device, self.dtype) for v in videos]
         
-        # Use original VAE encode
-        return self.vae.encode(videos)
-    
+        # clear cache before encoding
+        if hasattr(self.vae, 'clear_cache'):
+            self.vae.clear_cache()
+        
+        # use original vae encode
+        latents = self.vae.encode(videos)
+        
+        return latents
+        
     def decode(self, latents: List[torch.Tensor]) -> List[torch.Tensor]:
         """
-        Decode latent tensors to videos.
-        
-        Args:
-            latents: List of latent tensors
-            
-        Returns:
-            List of decoded video tensors
+        decode latent tensors to videos with proper cache management.
         """
-        # Ensure latents are on the correct device and dtype
+        # ensure latents are on correct device/dtype
         latents = [z.to(self.device, self.dtype) for z in latents]
         
-        # Use original VAE decode
-        return self.vae.decode(latents)
+        # clear cache before decoding
+        if hasattr(self.vae, 'clear_cache'):
+            self.vae.clear_cache()
+        
+        # use original vae decode
+        videos = self.vae.decode(latents)
+        
+        return videos
         
         
     def tiled_decode(self, latents: torch.Tensor, 
